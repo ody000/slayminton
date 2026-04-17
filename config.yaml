@@ -1,0 +1,2 @@
+# Centralized runtime configuration for model paths, thresholds, and FPS.
+# Values will be defined when the pipeline components are implemented.
