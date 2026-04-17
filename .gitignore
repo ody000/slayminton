@@ -1,0 +1,14 @@
+# Ignore video artifacts and intermediate model/data outputs.
+# This keeps large generated binaries and arrays out of version control.
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.flv
+*.wmv
+*.mpeg
+*.mpg
+*.m4v
+*.pt
+*.npy
