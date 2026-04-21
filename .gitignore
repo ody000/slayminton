@@ -12,3 +12,4 @@
 *.m4v
 *.pt
 *.npy
+.DS_Store
