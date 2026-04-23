@@ -931,4 +931,4 @@ def _compute_ap_from_scores(
     precision = np.concatenate(([1.0], precision, [0.0]))
     for i in range(precision.size - 2, -1, -1):
         precision[i] = max(precision[i], precision[i + 1])
-    return float(np.trapz(precision, recall))
+    return float(np.trapezoid(precision, recall))
