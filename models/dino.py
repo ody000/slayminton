@@ -819,7 +819,7 @@ def _create_vit_tiny() -> Tuple[nn.Module, int]:
             "timm is required for ViT backbone creation. Install via: pip install timm"
         ) from exc
 
-    encoder = timm.create_model("vit_tiny_patch16_384", pretrained=False, num_classes=0)
+    encoder = timm.create_model("vit_tiny_patch16_224", pretrained=False, num_classes=0, dynamic_img_size=True)
     embed_dim = getattr(encoder, "embed_dim", 192)
     return encoder, embed_dim
 
