@@ -4,6 +4,7 @@ The main execution loop implemented here.
 """
 
 import argparse
+from datetime import datetime
 import json
 import os
 from typing import List
@@ -12,24 +13,25 @@ import numpy as np
 from PIL import Image
 import torch
 
+from core.analysis import Analysis
 from core.game_state import GameState
 from models.dino import DINODataset, DINOTracker, train_dino
-
 
 
 """
 Main execution method for the Slayminton application.
 1. Define the paths for input video, output video, and CSV data. Handle
    edge cases, command-line arguments, or configuration files as needed.
-2. Initialize the modules for video IO, DINOv3 for shuttle/player detection, 
+2. Initialize the modules for video IO, DINOv3 for shuttle/player detection,
    homography, kinematics, and data writing.
 3. Open CSV file for writing extracted data.
-4. Start the main execution loop: for each video frame, perform shuttle and 
+4. Start the main execution loop: for each video frame, perform shuttle and
    player detection, apply homography to get 3D coordinates, compute kinematics,
    and record the data.
-5. Visualize the output with video IO. Handle graceful shutdown and resource 
-   cleanup after processing is complete. 
+5. Visualize the output with video IO. Handle graceful shutdown and resource
+   cleanup after processing is complete.
 """
+
 
 def main():
     # some CLI arguments for flexibility
@@ -43,15 +45,15 @@ def main():
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument(
-      "--frames-dir",
-      default="data/input/train",
-      help="Directory containing RGB image frames for dry-run tracking mode",
+        "--frames-dir",
+        default="data/input/train",
+        help="Directory containing RGB image frames for dry-run tracking mode",
     )
     parser.add_argument(
-      "--frame-limit",
-      type=int,
-      default=120,
-      help="Maximum number of frames to process in track-frames mode",
+        "--frame-limit",
+        type=int,
+        default=120,
+        help="Maximum number of frames to process in track-frames mode",
     )
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--rally-timeout-s", type=float, default=0.5)
@@ -65,47 +67,53 @@ def main():
 
     # If in training mode, run DINOv3 training loop and exit.
     if args.mode == "train":
-      # Build dataset from COCO annotations
-      dataset = DINODataset(
-         device=device,
-         data_dir=args.train_dir,
-         annotations_file=args.annotations,
-      )
-      # full training loop
-      student, _, history = train_dino(
-         student=None,
-         teacher=None,
-         dataset=dataset,
-         device=device,
-         epochs=args.epochs,
-         batch_size=args.batch_size,
-         learning_rate=args.learning_rate,
-         output_dir=args.output_dir,
-         checkpoint_name=os.path.basename(args.weights),
-      )
+        # Build dataset from COCO annotations
+        dataset = DINODataset(
+            device=device,
+            data_dir=args.train_dir,
+            annotations_file=args.annotations,
+        )
+        # full training loop
+        _, _, history = train_dino(
+            student=None,
+            teacher=None,
+            dataset=dataset,
+            device=device,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            learning_rate=args.learning_rate,
+            output_dir=args.output_dir,
+            checkpoint_name=os.path.basename(args.weights),
+        )
 
-      print("Training complete.")
-      print(f"Saved student checkpoint: {os.path.join(args.output_dir, os.path.basename(args.weights))}")
-      print(f"Last train loss: {history.train_loss[-1]:.4f}")
-      if history.val_iou:
-         print(f"Last val IoU: {history.val_iou[-1]:.4f} | Last val mAP@0.75: {history.val_map75[-1]:.4f}")
-      return
+        print("Training complete.")
+        print(f"Saved student checkpoint: {os.path.join(args.output_dir, os.path.basename(args.weights))}")
+        print(f"Last train loss: {history.train_loss[-1]:.4f}")
+        if history.val_iou:
+            print(f"Last val IoU: {history.val_iou[-1]:.4f} | Last val mAP@0.75: {history.val_map75[-1]:.4f}")
+        return
 
 
+    # Actual tracking starts here (if not training mode).
+    # Create one folder per input source/run under data/output.
+    input_tag = os.path.basename(os.path.normpath(args.frames_dir)) or "input"
+    run_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_output_dir = os.path.join(args.output_dir, f"{input_tag}_{run_tag}")
+    os.makedirs(run_output_dir, exist_ok=True)
 
-    # Actual tracking starts here (if not training mode)
-    # track-frames mode: dry-run frame processing path that mirrors upcoming video_io integration.
     tracker = DINOTracker(weights_path=args.weights if os.path.exists(args.weights) else None, device=device)
     rally_tracker = GameState(
-      inactive_timeout_s=args.rally_timeout_s,
-      min_displacement_px=args.min_shuttle_motion_px,
+        inactive_timeout_s=args.rally_timeout_s,
+        min_displacement_px=args.min_shuttle_motion_px,
     )
+    analysis = Analysis()
+
     frame_files: List[str] = sorted(
-      [
-         os.path.join(args.frames_dir, p)
-         for p in os.listdir(args.frames_dir)
-         if p.lower().endswith((".jpg", ".jpeg", ".png"))
-      ]
+        [
+            os.path.join(args.frames_dir, p)
+            for p in os.listdir(args.frames_dir)
+            if p.lower().endswith((".jpg", ".jpeg", ".png"))
+        ]
     )[: args.frame_limit]
 
     results = []
@@ -116,25 +124,47 @@ def main():
         det = tracker.detect(frame, timestamp=timestamp)
         rally_active = rally_tracker.update(timestamp=timestamp, shuttle_det=det.get("shuttle"))
         results.append(
-           {
-            "frame_path": frame_path,
-            "timestamp": timestamp,
-            "player": det.get("player"),
-            "shuttle": det.get("shuttle"),
-            "rally_active": rally_active,
+            {
+                "frame_path": frame_path,
+                "timestamp": timestamp,
+                "player": det.get("player"),
+                "shuttle": det.get("shuttle"),
+                "rally_active": rally_active,
             }
         )
 
-    output_path = os.path.join(args.output_dir, "tracking_results.json")
+    final_timestamp = (float(len(frame_files) - 1) / max(args.fps, 1e-6)) if frame_files else 0.0
+    rally_tracker.finalize_rally_data(final_timestamp)
+    rally_data = rally_tracker.get_rally_data()
+
+    analysis_results = analysis.compute_rally_statistics(rally_data)
+    analysis_results["output_dir"] = run_output_dir
+    visualization_paths = analysis.visualize_results(analysis_results)
+
+    output_path = os.path.join(run_output_dir, "tracking_results.json")
+    rally_output_path = os.path.join(run_output_dir, "rally_data.json")
+    stats_output_path = os.path.join(run_output_dir, "rally_statistics.json")
+
     # use JSON for output due to flexibility to store nested data
-    # can switch to CSV as needed
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
 
+    with open(rally_output_path, "w", encoding="utf-8") as f:
+        json.dump(rally_data, f, indent=2)
+
+    with open(stats_output_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "statistics": analysis_results,
+                "visualizations": visualization_paths,
+            },
+            f,
+            indent=2,
+        )
+
     print(f"Processed {len(frame_files)} frames")
-    print(f"Saved tracking results to: {output_path}")
+    print(f"Saved run outputs to: {run_output_dir}")
 
 
 if __name__ == "__main__":
     main()
-    

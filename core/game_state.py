@@ -24,6 +24,8 @@ class GameState:
         self.rally_active = False
         self.last_center: Optional[Tuple[float, float]] = None
         self.last_motion_timestamp: Optional[float] = None
+        self.current_rally_start_timestamp: Optional[float] = None
+        self.rally_data = []
 
         self.score = {"player1": 0, "player2": 0}
         self.hit_count = 0
@@ -37,6 +39,21 @@ class GameState:
             self.score[winner] += 1
         self.rally_active = False
         self.hit_count = 0
+
+    def _record_rally_segment(self, end_timestamp: float):
+        # Store structured rally entry for downstream analysis.
+        if self.current_rally_start_timestamp is None:
+            return
+        duration_s = max(float(end_timestamp) - float(self.current_rally_start_timestamp), 0.0)
+        self.rally_data.append(
+            {
+                "rally_id": len(self.rally_data) + 1,
+                "start_time": float(self.current_rally_start_timestamp),
+                "end_time": float(end_timestamp),
+                "duration_s": float(duration_s),
+            }
+        )
+        self.current_rally_start_timestamp = None
 
     def record_hit(self):
         if self.rally_active:
@@ -58,6 +75,8 @@ class GameState:
             if self.last_center is None:
                 # First visible shuttle sample starts a candidate active period.
                 self.last_motion_timestamp = timestamp
+                if not self.rally_active:
+                    self.current_rally_start_timestamp = timestamp
                 self.start_rally()
             else:
                 # Compare current shuttle center to last known center to determine motion.
@@ -68,6 +87,7 @@ class GameState:
                 if displacement >= self.min_displacement_px:
                     self.last_motion_timestamp = timestamp
                     if not self.rally_active:
+                        self.current_rally_start_timestamp = timestamp
                         self.start_rally()
                     self.record_hit()
 
@@ -77,8 +97,11 @@ class GameState:
             # If no recent movement, rally is over.
             # If no shuttle detected, this also falls out since center will be None and last_motion_timestamp won't update.
             if self.last_motion_timestamp is None:
+                self._record_rally_segment(timestamp)
                 self.end_rally()
             elif (timestamp - self.last_motion_timestamp) >= self.inactive_timeout_s:
+                # Rally end is pinned to last observed motion timestamp.
+                self._record_rally_segment(self.last_motion_timestamp)
                 self.end_rally()
 
         return self.rally_active
@@ -94,8 +117,19 @@ class GameState:
 
         if player_detected and shuttle_detected:
             if not self.rally_active:
+                self.current_rally_start_timestamp = timestamp
                 self.start_rally()
             self.record_hit()
         elif self.rally_active and (not player_detected or not shuttle_detected):
+            self._record_rally_segment(timestamp)
             self.end_rally()
         return self.rally_active
+
+    def finalize_rally_data(self, final_timestamp: float):
+        # If stream ends during an active rally, close it at final timestamp.
+        if self.rally_active:
+            self._record_rally_segment(final_timestamp)
+            self.end_rally()
+
+    def get_rally_data(self):
+        return list(self.rally_data)

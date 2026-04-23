@@ -13,6 +13,8 @@
 - Dataset split policy in training loop is 80/20 train/validation.
 - Validation metrics are reported using IoU and mAP@0.75.
 - Tracking output format per object is `(timestamp, x, y, height, width)`.
+- Rally end rule (current): if shuttle motion is below threshold for 0.5s, rally becomes inactive.
+- Structured rally records must include: `rally_id`, `start_time`, `end_time`, `duration_s`.
 
 ## Expected Behaviors
 - `DINODataset` should:
@@ -31,6 +33,15 @@
 - `visualize_training` should:
 	- Save sample prediction overlays for student + teacher.
 	- Save loss and metric curves.
+- `GameState` should:
+	- Track `rally_active` using shuttle motion inactivity timeout logic.
+	- Emit structured rally segments for analysis consumption.
+- `Analysis` should:
+	- Compute rally duration statistics only (current scope).
+	- Save rally duration histogram PNG outputs.
+- `main.py` should:
+	- Create a per-input run folder under `data/output/`.
+	- Persist `tracking_results.json`, `rally_data.json`, and rally statistics artifacts in that folder.
 
 ## Iteration Log (Current)
 - Implemented full `models/dino.py`:
@@ -43,6 +54,16 @@
 	- Added CLI modes for training (`train`) and dry-run frame tracking (`track-frames`).
 	- Wired dataset creation, model training, checkpoint writing, and result export to JSON.
 	- Kept video integration decoupled so future `video_io.py` output tensors can feed directly into tracker inference.
+- Implemented `core/game_state.py` rally data flow:
+	- Preserved existing `GameState` naming and method signatures.
+	- Added structured rally segment recording (`rally_id`, start/end/duration).
+	- Added finalize/get helpers for end-of-stream rally closure and analysis handoff.
+- Implemented `core/analysis.py`:
+	- Implemented `__init__`, `compute_rally_statistics`, and `visualize_results`.
+	- Focused only on rally duration statistics and histogram generation.
+- Updated `main.py` run artifact handling:
+	- Creates one timestamped output folder per input source under `data/output/`.
+	- Saves tracking JSON, structured rally JSON, rally statistics JSON, and PNG visualizations.
 
 ## Integration Notes For Next Iteration
 - Replace `track-frames` directory scan in `main.py` with direct frame tensor stream from `utils/video_io.py` once available.
