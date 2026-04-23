@@ -411,6 +411,10 @@ def train_dino(
     """
     os.makedirs(output_dir, exist_ok=True)
     device = torch.device(device)
+    print(
+        f"[TRAIN] start epochs={epochs} batch_size={batch_size} "
+        f"lr={learning_rate} output_dir={output_dir}"
+    )
 
     # Caller can pass custom models; otherwise create default student/teacher.
     student_model = student if isinstance(student, DINOTracker) else _build_tracker_model(device)
@@ -422,6 +426,10 @@ def train_dino(
         p.requires_grad = False
 
     train_subset, val_subset = _split_dataset(dataset, train_ratio=0.8, seed=42)
+    print(
+        f"[TRAIN] dataset_split train={len(train_subset)} val={len(val_subset)} "
+        f"eval_every={VAL_EVERY}"
+    )
     train_loader = DataLoader(
         train_subset,
         batch_size=batch_size,
@@ -534,17 +542,19 @@ def train_dino(
             history.val_map75.append(val_map75)
             history.eval_epochs.append(epoch + 1)
             print(
-                f"Epoch {epoch + 1:03d}/{epochs} | train_loss={avg_train_loss:.4f} "
+                f"[TRAIN] epoch {epoch + 1:03d}/{epochs} | train_loss={avg_train_loss:.4f} "
                 f"val_loss={val_loss:.4f} val_iou={val_iou:.4f} val_mAP@0.75={val_map75:.4f}"
             )
         else:
-            print(f"Epoch {epoch + 1:03d}/{epochs} | train_loss={avg_train_loss:.4f}")
+            print(f"[TRAIN] epoch {epoch + 1:03d}/{epochs} | train_loss={avg_train_loss:.4f}")
 
     # Save both student and teacher so experiments are easy to resume/compare.
     ckpt_path = os.path.join(output_dir, checkpoint_name)
     student_model.save_checkpoint(ckpt_path)
     teacher_ckpt_path = os.path.join(output_dir, f"teacher_{checkpoint_name}")
     teacher_model.save_checkpoint(teacher_ckpt_path)
+    print(f"[TRAIN] saved_checkpoint student={ckpt_path}")
+    print(f"[TRAIN] saved_checkpoint teacher={teacher_ckpt_path}")
 
     history_np = {
         "train_loss": np.asarray(history.train_loss, dtype=np.float32),
@@ -555,6 +565,7 @@ def train_dino(
     }
     # Save curves as arrays for later plotting or analysis scripts.
     np.savez(os.path.join(output_dir, "dino_training_history.npz"), **history_np)
+    print(f"[TRAIN] saved_history={os.path.join(output_dir, 'dino_training_history.npz')}")
 
     visualize_training(
         student_model,
@@ -564,6 +575,7 @@ def train_dino(
         history=history,
         save_dir=output_dir,
     )
+    print("[TRAIN] complete")
 
     return student_model, teacher_model, history
 

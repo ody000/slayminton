@@ -59,20 +59,25 @@ def main():
     parser.add_argument("--rally-timeout-s", type=float, default=0.5)
     parser.add_argument("--min-shuttle-motion-px", type=float, default=2.0)
     args = parser.parse_args()
+    print(f"[MAIN] mode={args.mode}")
+    print(f"[MAIN] output_dir={args.output_dir}")
 
     os.makedirs(args.output_dir, exist_ok=True)
     # GPU when available
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[MAIN] device={device}")
 
 
     # If in training mode, run DINOv3 training loop and exit.
     if args.mode == "train":
+        print("[MAIN] entering training mode")
         # Build dataset from COCO annotations
         dataset = DINODataset(
             device=device,
             data_dir=args.train_dir,
             annotations_file=args.annotations,
         )
+        print(f"[MAIN] dataset_size={len(dataset)} train_dir={args.train_dir}")
         # full training loop
         _, _, history = train_dino(
             student=None,
@@ -86,7 +91,7 @@ def main():
             checkpoint_name=os.path.basename(args.weights),
         )
 
-        print("Training complete.")
+        print("[MAIN] training_complete")
         print(f"Saved student checkpoint: {os.path.join(args.output_dir, os.path.basename(args.weights))}")
         print(f"Last train loss: {history.train_loss[-1]:.4f}")
         if history.val_iou:
@@ -100,6 +105,7 @@ def main():
     run_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_output_dir = os.path.join(args.output_dir, f"{input_tag}_{run_tag}")
     os.makedirs(run_output_dir, exist_ok=True)
+    print(f"[MAIN] run_output_dir={run_output_dir}")
 
     tracker = DINOTracker(weights_path=args.weights if os.path.exists(args.weights) else None, device=device)
     rally_tracker = GameState(
@@ -115,8 +121,10 @@ def main():
             if p.lower().endswith((".jpg", ".jpeg", ".png"))
         ]
     )[: args.frame_limit]
+    print(f"[MAIN] track_frames count={len(frame_files)} fps={args.fps}")
 
     results = []
+    progress_interval = max(1, int(args.fps))
     for i, frame_path in enumerate(frame_files):
         # Convert frame index to seconds so timeout logic is meaningful.
         timestamp = float(i) / max(args.fps, 1e-6)
@@ -132,6 +140,12 @@ def main():
                 "rally_active": rally_active,
             }
         )
+
+        if (i + 1) % progress_interval == 0 or (i + 1) == len(frame_files):
+            print(
+                f"[MAIN] frame={i + 1}/{len(frame_files)} "
+                f"t={timestamp:.3f}s rally_active={rally_active}"
+            )
 
     final_timestamp = (float(len(frame_files) - 1) / max(args.fps, 1e-6)) if frame_files else 0.0
     rally_tracker.finalize_rally_data(final_timestamp)
@@ -162,8 +176,11 @@ def main():
             indent=2,
         )
 
-    print(f"Processed {len(frame_files)} frames")
-    print(f"Saved run outputs to: {run_output_dir}")
+    print(f"[MAIN] processed_frames={len(frame_files)}")
+    print(f"[MAIN] saved_tracking={output_path}")
+    print(f"[MAIN] saved_rally_data={rally_output_path}")
+    print(f"[MAIN] saved_stats={stats_output_path}")
+    print(f"[MAIN] run_complete dir={run_output_dir}")
 
 
 if __name__ == "__main__":

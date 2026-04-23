@@ -33,12 +33,18 @@ class GameState:
     def start_rally(self):
         self.rally_active = True
         self.hit_count = 0
+        ts = self.current_rally_start_timestamp
+        if ts is None:
+            print("[GAME] rally_start")
+        else:
+            print(f"[GAME] rally_start t={ts:.3f}s")
 
     def end_rally(self, winner=None):
         if winner in self.score:
             self.score[winner] += 1
         self.rally_active = False
         self.hit_count = 0
+        print("[GAME] rally_end")
 
     def _record_rally_segment(self, end_timestamp: float):
         # Store structured rally entry for downstream analysis.
@@ -53,11 +59,20 @@ class GameState:
                 "duration_s": float(duration_s),
             }
         )
+        print(
+            f"[GAME] rally_segment id={len(self.rally_data)} "
+            f"start={self.current_rally_start_timestamp:.3f}s end={float(end_timestamp):.3f}s "
+            f"duration={duration_s:.3f}s"
+        )
         self.current_rally_start_timestamp = None
 
     def record_hit(self):
         if self.rally_active:
             self.hit_count += 1
+            if self.last_motion_timestamp is not None:
+                print(f"[GAME] hit t={self.last_motion_timestamp:.3f}s count={self.hit_count}")
+            else:
+                print(f"[GAME] hit count={self.hit_count}")
 
     @staticmethod
     def _center_from_shuttle(shuttle_det: Optional[ShuttleTuple]) -> Optional[Tuple[float, float]]:
@@ -130,6 +145,7 @@ class GameState:
         if self.rally_active:
             self._record_rally_segment(final_timestamp)
             self.end_rally()
+        print(f"[GAME] finalize rallies={len(self.rally_data)} at t={float(final_timestamp):.3f}s")
 
     def get_rally_data(self):
         return list(self.rally_data)

@@ -11,6 +11,7 @@ class Analysis:
     def __init__(self):
         # Keep this class focused on rally duration stats for now.
         self.last_results = None
+        print("[ANALYSIS] initialized")
 
     def analyze_shuttle_trajectories(self, shuttle_detections):
         # Placeholder for trajectory analysis logic
@@ -30,6 +31,7 @@ class Analysis:
         Rally data is currently recorded in JSON output from tracking loop
         modified by GameState updates.
         """
+        print(f"[ANALYSIS] compute_rally_statistics input_rallies={len(rally_data or [])}")
         # Expected input format per rally item:
         # {"rally_id": int, "start_time": float, "end_time": float, "duration_s": float}
         normalized = []
@@ -72,6 +74,13 @@ class Analysis:
         }
 
         self.last_results = results
+        print(
+            "[ANALYSIS] rally_stats "
+            f"count={results['rally_count']} "
+            f"mean={results['mean_rally_duration_s']:.3f}s "
+            f"min={results['min_rally_duration_s']:.3f}s "
+            f"max={results['max_rally_duration_s']:.3f}s"
+        )
         return results
 
     def analyze_player_movements(self, player_detections):
@@ -129,6 +138,7 @@ class Analysis:
         histogram_path = os.path.join(output_dir, "rally_duration_histogram.png")
         plt.savefig(histogram_path, dpi=160)
         plt.close(fig)
+        print(f"[ANALYSIS] saved_histogram path={histogram_path}")
 
         return {
             "rally_duration_histogram": histogram_path,
