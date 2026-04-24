@@ -55,6 +55,7 @@ def main():
         default=120,
         help="Maximum number of frames to process in track-frames mode",
     )
+    print("[MAIN] check 1")
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--rally-timeout-s", type=float, default=0.5)
     parser.add_argument("--min-shuttle-motion-px", type=float, default=2.0)
