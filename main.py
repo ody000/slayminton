@@ -35,6 +35,7 @@ Main execution method for the Slayminton application.
 
 def main():
     # some CLI arguments for flexibility
+    print("pre_argparse")
     parser = argparse.ArgumentParser(description="Slayminton DINOv3 training + tracking")
     parser.add_argument("--mode", choices=["train", "track-frames"], default="train")
     parser.add_argument("--train-dir", default="data/input/train")
