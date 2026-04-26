@@ -184,7 +184,7 @@ def main():
     print(f"[MAIN] saved_stats={stats_output_path}")
     print(f"[MAIN] run_complete dir={run_output_dir}")
 
-
+print(__name__)
 if __name__ == "__main__":
-    print(__name__)
+    
     main()
