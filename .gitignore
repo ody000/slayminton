@@ -13,3 +13,7 @@
 *.pt
 *.npy
 .DS_Store
+data/output/local_cpu_smoke/
+*/__pycache__
+*.log
+*.err

@@ -4,7 +4,9 @@ Tracks rally status, score, and hit counts."""
 from __future__ import annotations
 
 import math
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
+
+import numpy as np
 
 
 ShuttleTuple = Tuple[float, float, float, float, float]
@@ -29,6 +31,13 @@ class GameState:
 
         self.score = {"player1": 0, "player2": 0}
         self.hit_count = 0
+
+        # Trajectory prediction-based hit detection.
+        self.position_history: List[Tuple[float, float, float]] = []  # (timestamp, x, y)
+        self.history_max_len = 5  # keep last 5 positions for trajectory fitting
+        self.prediction_error_threshold = 10.0  # pixels; if prediction error > this, it's a hit
+        self.last_hit_timestamp: Optional[float] = None
+        self.hit_cooldown_s = 0.2  # minimum time between consecutive hits (200ms)
 
     def start_rally(self):
         self.rally_active = True
@@ -82,11 +91,75 @@ class GameState:
         _, x, y, h, w = shuttle_det
         return (x + 0.5 * w, y + 0.5 * h)
 
+    def _fit_trajectory(self) -> Optional[Tuple[float, float, float]]:
+        """Fit linear trajectory model to position history.
+        Returns (vx, vy, avg_speed) or None if insufficient history.
+        """
+        if len(self.position_history) < 2:
+            return None
+        hist = self.position_history
+        # Simple linear fit: use last two positions to estimate velocity.
+        t1, x1, y1 = hist[-2]
+        t2, x2, y2 = hist[-1]
+        dt = max(t2 - t1, 1e-6)
+        vx = (x2 - x1) / dt
+        vy = (y2 - y1) / dt
+        speed = math.hypot(vx, vy)
+        return (vx, vy, speed)
+
+    def _predict_position(self, next_timestamp: float) -> Optional[Tuple[float, float]]:
+        """Predict shuttle position at next_timestamp using linear trajectory model.
+        Returns (pred_x, pred_y) or None if cannot predict.
+        """
+        if len(self.position_history) < 2:
+            return None
+        trajectory = self._fit_trajectory()
+        if trajectory is None:
+            return None
+        vx, vy, _ = trajectory
+        _, last_x, last_y = self.position_history[-1]
+        last_t = self.position_history[-1][0]
+        dt = next_timestamp - last_t
+        pred_x = last_x + vx * dt
+        pred_y = last_y + vy * dt
+        return (pred_x, pred_y)
+
+    def _detect_hit(self, current_pos: Tuple[float, float], current_timestamp: float) -> bool:
+        """Detect if current position indicates a hit (trajectory discontinuity).
+        Returns True if prediction error exceeds threshold and not in cooldown.
+        """
+        if len(self.position_history) < 2:
+            # Not enough history yet; no hit detected.
+            return False
+
+        # Check cooldown: avoid multiple hits in quick succession.
+        if self.last_hit_timestamp is not None:
+            if (current_timestamp - self.last_hit_timestamp) < self.hit_cooldown_s:
+                return False
+
+        pred = self._predict_position(current_timestamp)
+        if pred is None:
+            return False
+
+        pred_x, pred_y = pred
+        cur_x, cur_y = current_pos
+        error = math.hypot(cur_x - pred_x, cur_y - pred_y)
+
+        if error > self.prediction_error_threshold:
+            self.last_hit_timestamp = current_timestamp
+            return True
+        return False
+
     def update(self, timestamp: float, shuttle_det: Optional[ShuttleTuple]) -> bool:
         """Update state from one frame and return current rally_active."""
         center = self._center_from_shuttle(shuttle_det)
 
         if center is not None:
+            # Update position history for trajectory tracking.
+            self.position_history.append((timestamp, center[0], center[1]))
+            if len(self.position_history) > self.history_max_len:
+                self.position_history.pop(0)
+
             if self.last_center is None:
                 # First visible shuttle sample starts a candidate active period.
                 self.last_motion_timestamp = timestamp
@@ -104,7 +177,10 @@ class GameState:
                     if not self.rally_active:
                         self.current_rally_start_timestamp = timestamp
                         self.start_rally()
-                    self.record_hit()
+
+                    # Check for hit using trajectory prediction-based detector.
+                    if self._detect_hit(center, timestamp):
+                        self.record_hit()
 
             self.last_center = center
 
