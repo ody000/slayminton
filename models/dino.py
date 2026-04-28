@@ -211,7 +211,7 @@ class DINODataset(Dataset):
         self.annotations_file = (
             annotations_file
             if annotations_file is not None
-            else os.path.join(self.data_dir, "_annotations.coco.json")
+            else os.path.join(self.data_dir, "../_annotations.coco.json")
         )
 
         # Parse COCO once and cache indexes for fast __getitem__.
