@@ -15,6 +15,7 @@ Outputs:
 import cv2
 import os
 import glob
+import json
 from collections import defaultdict
 
 TRAIN_PATH      = "data/input/train"
@@ -100,6 +101,24 @@ def process_video(video_id: str, frame_paths: list, fps: int = DEFAULT_FPS) -> N
     print(f"\n  ✓ video  -> {video_out_path}")
     print(f"  ✓ frames -> {frame_out_dir}/")
 
+def coco_mog2():
+    with open("data/input/train_mog_frames/_annotations.coco.json") as f:
+        coco = json.load(f)
+
+        for img in coco["images"]:
+            name = img["file_name"]
+
+            # extract video_id (same logic as your script)
+            dash_idx = name.find("-")
+            if dash_idx != -1:
+                video_id = name[:dash_idx]
+            else:
+                video_id = "unknown"
+
+            img["file_name"] = os.path.join(video_id, name)
+
+    with open("_annotations.coco.json", "w") as f:
+        json.dump(coco, f)
 
 def main() -> None:
     groups = group_frames_by_video(TRAIN_PATH)
@@ -119,5 +138,6 @@ def main() -> None:
     print(f"  Videos -> {VIDEOS_OUT_PATH}/")
 
 
+
 if __name__ == "__main__":
-    main()
+    coco_mog2()

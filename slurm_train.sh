@@ -58,7 +58,7 @@ INPUT_ROOT="${DATA_ROOT}/input"
 OUTPUT_ROOT="${DATA_ROOT}/output"
 
 # Current training data layout in this repo.
-TRAIN_DIR="${INPUT_ROOT}/train"
+TRAIN_DIR="${INPUT_ROOT}/train_mog_frames"
 ANNOTATIONS_FILE="${TRAIN_DIR}/_annotations.coco.json"
 
 # For run-main mode (track-frames):
