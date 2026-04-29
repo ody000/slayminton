@@ -35,7 +35,7 @@ NUM_LOCAL_CROPS = 6
 GLOBAL_CROP_SIZE = 384 # 720p-friendly
 LOCAL_CROP_SIZE = 128 # larger crops preserve more detail
 BATCH_SIZE = 16
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 1e-3
 EPOCHS = 100
 WEIGHT_DECAY = 1e-4
 DINO_OUT_DIM = 256
@@ -434,14 +434,14 @@ def train_dino(
         train_subset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=0,
+        num_workers=4,
         collate_fn=_dino_collate,
     )
     val_loader = DataLoader(
         val_subset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=0,
+        num_workers=4,
         collate_fn=_dino_collate,
     )
 
