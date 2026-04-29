@@ -102,7 +102,7 @@ def process_video(video_id: str, frame_paths: list, fps: int = DEFAULT_FPS) -> N
     print(f"  ✓ frames -> {frame_out_dir}/")
 
 def coco_mog2():
-    with open("data/input/train_mog_frames/_annotations.coco.json") as f:
+    with open("data/input/train/_annotations.coco.json") as f:
         coco = json.load(f)
 
         for img in coco["images"]:
@@ -115,7 +115,7 @@ def coco_mog2():
             else:
                 video_id = "unknown"
 
-            img["file_name"] = os.path.join(video_id, name)
+            img["file_name"] = video_id + "/" + name
 
     with open("_annotations.coco.json", "w") as f:
         json.dump(coco, f)
