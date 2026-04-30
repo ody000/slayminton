@@ -151,7 +151,7 @@ if [[ "${MODE}" == "train-dino" ]]; then
 	echo "[SLURM] Output dir:       ${TRAIN_OUTPUT_DIR}"
 	echo "[SLURM] Checkpoint path:  ${WEIGHTS_PATH}"
 
-	uv run -v CUDA_LAUNCH_BLOCKING=1 python -u main.py \
+	uv run -v python -u main.py \
 		--mode train \
 		--train-dir "${TRAIN_DIR}" \
 		--annotations "${ANNOTATIONS_FILE}" \
@@ -173,7 +173,7 @@ elif [[ "${MODE}" == "run-main" ]]; then
 	# If you trained in a previous run, point WEIGHTS_PATH to that checkpoint via:
 	#   sbatch --export=ALL,WEIGHTS_PATH=/path/to/dino_tracker.pt slurm_train.sh run-main
 	# If WEIGHTS_PATH doesn't exist, main.py will still run with randomly initialized model.
-	uv run -v CUDA_LAUNCH_BLOCKING=1 python -u main.py \
+	uv run -v python -u main.py \
 		--mode track-frames \
 		--frames-dir "${FRAMES_DIR}" \
 		--frame-limit "${FRAME_LIMIT}" \
