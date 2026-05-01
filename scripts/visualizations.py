@@ -18,11 +18,13 @@ import cv2
 import numpy as np
 import os
 import glob
+import json
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 TRAIN_PATH       = "data/input/train"
 MASK_FRAMES_PATH = "data/input/train_mog_frames"
 VIZ_OUT_PATH     = "data/input/train_viz_mp4s"
+STORED_COURT_POINTS_PATH = "data/input/court_points.json"
 
 # ── Detection thresholds & Tracking ──────────────────────────────────────────
 MIN_BLOB_AREA   = 30
@@ -46,8 +48,9 @@ INSERT_ALPHA = 0.82     # overlay opacity
 # Court corners in VIDEO pixel coords: [TL, TR, BR, BL] clockwise.
 # When set, a homography maps player positions to a true top-down view.
 # Leave as None to use a simple linear (full-frame) mapping instead.
-# Example: COURT_CORNERS_VIDEO = [(110,35), (610,35), (610,445), (110,445)]
-COURT_CORNERS_VIDEO = None
+# Example: COURT_CORNERS_VIDEO = [(110,35), (610,35), (610,445), (110,445)] THIS NOW REQUIRES TWO MORE TUPLES FOR THE BOTTOM AND TOP OF THE MIDLINE
+# COURT_CORNERS_VIDEO = None
+# THIS IS NO LONGER NEEDED THEORETICALLY
 
 # ── Per-player colours (BGR) ──────────────────────────────────────────────────
 P1_COLOR = (57,  255,  20)   # neon green
@@ -56,6 +59,8 @@ P2_COLOR = (0,   165, 255)   # orange
 # ── Video ─────────────────────────────────────────────────────────────────────
 DEFAULT_FPS = 30
 
+# ── Booleans ─────────────────────────────────────────────────────────────────────
+SET_COURT_POINTS = False # turn true if you want to set all the court points manually even those that are already saved
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Court geometry helpers
@@ -66,6 +71,7 @@ _CX0 = COURT_PAD
 _CX1 = INSERT_W - COURT_PAD
 _CY0 = COURT_PAD
 _CY1 = INSERT_H - COURT_PAD
+_CMX = (_CX1 - _CX0) / 2.0
 _CW  = _CX1 - _CX0   # court pixel width
 _CH  = _CY1 - _CY0   # court pixel height
 
@@ -130,19 +136,24 @@ def draw_court_background() -> np.ndarray:
     return img
 
 
-def compute_homography(frame_h: int, frame_w: int) -> np.ndarray | None:
+def compute_homography(frame_h: int, frame_w: int, court_corners) -> np.ndarray | None:
+    # """
+    # If COURT_CORNERS_VIDEO is set, compute a homography that maps video
+    # pixel coords → court-insert pixel coords.
+    # """
+    # if COURT_CORNERS_VIDEO is None:
+    #     return None
     """
-    If COURT_CORNERS_VIDEO is set, compute a homography that maps video
-    pixel coords → court-insert pixel coords.
+    compute a homography that maps video pixel coords → court-insert pixel coords.
     """
-    if COURT_CORNERS_VIDEO is None:
-        return None
-    src = np.array(COURT_CORNERS_VIDEO, dtype=np.float32)
+    src = np.array(court_corners, dtype=np.float32)
     dst = np.array([
-        [_CX0, _CY0],
-        [_CX1, _CY0],
-        [_CX1, _CY1],
-        [_CX0, _CY1],
+        [_CX0, _CY0], # bottom left
+        [_CX1, _CY0], # bottom right
+        [_CX1, _CY1], # top right
+        [_CX0, _CY1], # top left
+        [_CMX, _CY0], # bottom of the midline
+        [_CMX, _CY1] # top of the midline
     ], dtype=np.float32)
     H, _ = cv2.findHomography(src, dst)
     return H
@@ -333,6 +344,79 @@ def orig_path_for(mask_path: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Setting court points
+# ─────────────────────────────────────────────────────────────────────────────
+
+def set_court_points(first_orig, video_id):
+    points = []
+    first_frame = first_orig.copy()
+
+    labels = [
+        "Bottom-Left",
+        "Bottom-Right",
+        "Top-Right",
+        "Top-Left",
+        "Midline Bottom",
+        "Midline Top"
+    ]
+    
+    def redraw():
+        first_frame = first_orig.copy()
+        for p in points:
+            cv2.circle(first_frame, p, 5, (0, 255, 0), -1)
+
+        if len(points) < 6:
+            cv2.putText(first_frame, f"Click: {labels[len(points)]}",
+                        (20, 40), cv2.FONT_HERSHEY_SIMPLEX,
+                        1, (0, 255, 255), 2)
+            
+        cv2.imshow("frame", first_frame)
+
+    def click_event(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            points.append((x, y))
+            print(f"Point {len(points)}: ({x}, {y})")
+            redraw()
+
+    redraw()
+    cv2.setMouseCallback("frame", click_event)
+
+    while True:
+        key = cv2.waitKey(1) & 0xFF
+
+        if key == ord('z'):  # undo
+            if points:
+                points.pop()
+                redraw()
+
+        # exit if 6 points collected
+        if len(points) == 6:
+            break
+
+        # optional: press 'q' to quit early
+        if key == ord('q'):
+            break
+
+    cv2.destroyAllWindows()
+
+    print("Collected points:", points)
+
+    # --- LOAD existing data ---
+    if os.path.exists(STORED_COURT_POINTS_PATH):
+        with open(STORED_COURT_POINTS_PATH, "r") as f:
+            all_data = json.load(f)
+    else:
+        all_data = {}
+
+    # --- UPDATE this video ---
+    all_data[video_id] = points
+
+    # --- SAVE back ---
+    with open(STORED_COURT_POINTS_PATH, "w") as f:
+        json.dump(all_data, f, indent=4)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Per-video processing
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -347,8 +431,27 @@ def process_video(video_id: str, mask_paths: list[str], fps: int = DEFAULT_FPS) 
     print(f"  size: {W}×{H}  fps: {fps}")
     print(f"  court insert: {INSERT_W}×{INSERT_H} px  (ratio {INSERT_W/INSERT_H:.3f}, "
           f"real {COURT_WID_M}/{COURT_LEN_M}={COURT_WID_M/COURT_LEN_M:.3f})")
+    
+    # if there is no saved data for the court points, set them manually
+    if os.path.exists(STORED_COURT_POINTS_PATH):
+        with open(STORED_COURT_POINTS_PATH, "r") as f:
+            all_data = json.load(f)
+    else:
+        all_data = {}
+    if video_id not in all_data or SET_COURT_POINTS:
+        set_court_points(first_orig, video_id)
 
-    homography  = compute_homography(H, W)
+    # reload json and set COURT_CORNERS_VIDEO
+    if os.path.exists(STORED_COURT_POINTS_PATH):
+        with open(STORED_COURT_POINTS_PATH, "r") as f:
+            all_data = json.load(f)
+    else:
+        all_data = {}
+    court_corners = None
+    if video_id in all_data:
+        court_corners = np.array(all_data[video_id], dtype=np.float32)
+    
+    homography  = compute_homography(H, W, court_corners)
     court_base  = draw_court_background()
 
     # Heatmap accumulators in court-INSERT pixel space (not full-frame)
