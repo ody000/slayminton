@@ -57,6 +57,14 @@ def main():
         default=None,
         help="Path to local pretrained backbone weights (.pth) to load into the encoder (optional)",
     )
+    parser.add_argument(
+        "--dinov2-model",
+        default=None,
+        help="Name of the DINOV2 model to load (e.g., dinov2_vitb14). If set, exported to DINOV2_MODEL env var.",
+    )
+    parser.add_argument("--num-workers", type=int, default=0, help="DataLoader num_workers (debug default 0)")
+    parser.add_argument("--debug-batches", type=int, default=0, help="If >0, run only this many batches per epoch (debug)")
+    parser.add_argument("--log-every", type=int, default=10, help="Log every N steps during training")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument(
@@ -93,6 +101,10 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[MAIN] device={device}")
 
+    # Respect requested DINOV2 model name via env var so model loader can pick it up.
+    if getattr(args, "dinov2_model", None):
+        os.environ["DINOV2_MODEL"] = args.dinov2_model
+
 
     # If in training mode, run DINOv3 training loop and exit.
     if args.mode == "train":
@@ -120,6 +132,9 @@ def main():
             batch_size=args.batch_size,
             learning_rate=args.learning_rate,
             pretrained_backbone_path=args.pretrained_backbone,
+            num_workers=args.num_workers,
+            debug_batches=args.debug_batches,
+            log_every=args.log_every,
             freeze_backbone_epochs=5,
             output_dir=args.output_dir,
             checkpoint_name=os.path.basename(args.weights),
