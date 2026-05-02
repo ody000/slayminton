@@ -109,7 +109,7 @@ mkdir -p "${RUN_ROOT}" "${TRAIN_OUTPUT_DIR}" "${CHECKPOINT_DIR}" "${MAIN_OUTPUT_
 # Train mode knobs
 EPOCHS="${EPOCHS:-80}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
-LR="${LR:-1e-3}"  # faster convergence on training plateau
+LR="${LR:-5e-4}"  # faster convergence on training plateau
 WEIGHTS_NAME="${WEIGHTS_NAME:-dino_tracker.pt}"
 WEIGHTS_PATH="${CHECKPOINT_DIR}/${WEIGHTS_NAME}"
 
