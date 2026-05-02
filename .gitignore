@@ -16,3 +16,4 @@
 *.err
 data/output/*
 models/dinov2_vitb14_reg4_pretrain.pth
+*.pyc
