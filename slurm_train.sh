@@ -29,9 +29,9 @@
 # Tune these for your account/queue policy.
 # If jobs stay pending too long, reduce time/mem/gpu requests.
 #SBATCH -p gpu
-#SBATCH --gres=gpu:2
-#SBATCH -n 8
-#SBATCH --mem=32G
+#SBATCH --gres=gpu:4
+#SBATCH -n 16
+#SBATCH --mem=64G
 #SBATCH -t 08:00:00
 #SBATCH -J slayminton
 #SBATCH -o slurm-%j.out
@@ -108,8 +108,8 @@ mkdir -p "${RUN_ROOT}" "${TRAIN_OUTPUT_DIR}" "${CHECKPOINT_DIR}" "${MAIN_OUTPUT_
 
 # Train mode knobs
 EPOCHS="${EPOCHS:-80}"
-BATCH_SIZE="${BATCH_SIZE:-16}"
-LR="${LR:-5e-4}"  # Improved from 1e-4; 5e-3 for faster convergence on training plateau
+BATCH_SIZE="${BATCH_SIZE:-32}"
+LR="${LR:-1e-3}"  # faster convergence on training plateau
 WEIGHTS_NAME="${WEIGHTS_NAME:-dino_tracker.pt}"
 WEIGHTS_PATH="${CHECKPOINT_DIR}/${WEIGHTS_NAME}"
 
