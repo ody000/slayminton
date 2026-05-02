@@ -24,17 +24,18 @@
 # ============================================================
 
 # -------------------------
-# SBATCH directives removed to allow flexible submission.
-# Prefer passing resources at sbatch time, e.g.:
-#   sbatch --partition=gpu --gres=gpu:1 --cpus-per-task=6 --mem=32G --time=02:00:00 \
-#     --output=logs/dino_%j.out slurm_train.sh train-dino
-# If you want defaults, set them via environment on the sbatch command line
-# (see usage examples in the repo README).
-
-## Optional runtime knobs (export via sbatch --export=ALL,VAR=val)
-NUM_WORKERS="${NUM_WORKERS:-0}"
-DEBUG_BATCHES="${DEBUG_BATCHES:-0}"
-LOG_EVERY="${LOG_EVERY:-10}"
+# SLURM resources
+# -------------------------
+# Tune these for your account/queue policy.
+# If jobs stay pending too long, reduce time/mem/gpu requests.
+#SBATCH -p gpu
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=6
+#SBATCH --mem=32G
+#SBATCH -t 08:00:00
+#SBATCH -J slayminton
+#SBATCH -o logs/slurm-%j.out
+#SBATCH -e logs/slurm-%j.err
 
 set -euo pipefail
 
@@ -167,12 +168,7 @@ if [[ "${MODE}" == "train-dino" ]]; then
 		--weights "${WEIGHTS_PATH}" \
 		--epochs "${EPOCHS}" \
 		--batch-size "${BATCH_SIZE}" \
-		--learning-rate "${LR}" \
-		--pretrained-backbone "${PRETRAINED_BACKBONE:-}" \
-		--dinov2-model "${DINOV2_MODEL}" \
-		--num-workers "${NUM_WORKERS}" \
-		--debug-batches "${DEBUG_BATCHES}" \
-		--log-every "${LOG_EVERY}"
+		--learning-rate "${LR}"
 
 	echo "[SLURM] train-dino complete"
 	echo "[SLURM] Artifacts are in: ${RUN_ROOT}"
@@ -208,4 +204,20 @@ fi
 echo "============================================"
 echo "Finished:          $(date)"
 echo "============================================"
+
+## Optional runtime knobs (export via sbatch --export=ALL,VAR=val)
+NUM_WORKERS="${NUM_WORKERS:-0}"
+DEBUG_BATCHES="${DEBUG_BATCHES:-0}"
+LOG_EVERY="${LOG_EVERY:-10}"
+DEBUG_MODE="${DEBUG_MODE:-0}"
+
+# If DEBUG_MODE is enabled (export DEBUG_MODE=1), reduce run sizes for quick debug.
+if [[ "${DEBUG_MODE}" == "1" ]]; then
+  echo "[SLURM] DEBUG_MODE=1 -> applying debug defaults: EPOCHS=1, BATCH_SIZE=4, NUM_WORKERS=0, DEBUG_BATCHES=1, LOG_EVERY=5"
+  EPOCHS="${EPOCHS:-1}"
+  BATCH_SIZE="${BATCH_SIZE:-4}"
+  NUM_WORKERS="0"
+  DEBUG_BATCHES="1"
+  LOG_EVERY="5"
+fi
 
