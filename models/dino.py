@@ -90,6 +90,30 @@ class DINOTracker(nn.Module):
 
         # One shared encoder for both SSL projection and detection.
         self.encoder, self.encoder_dim = _create_vit_tiny(pretrained_weights_path=pretrained_backbone_path)
+
+        # determine patch H
+        patch_size = None
+        pe = getattr(self.encoder, "patch_embed", None)
+        if pe is not None:
+            ps = getattr(pe, "patch_size", None)
+            if isinstance(ps, (tuple, list)):
+                patch_size = int(ps[0])
+            elif isinstance(ps, int):
+                patch_size = ps
+        # default fallback
+        patch_size = patch_size or 16
+
+        # round input_size up to multiple of patch_size
+        if self.input_size % patch_size != 0:
+            new_size = ((self.input_size + patch_size - 1) // patch_size) * patch_size
+            print(f"[DINO] adjusting input_size {self.input_size} -> {new_size} to match patch_size {patch_size}")
+            self.input_size = new_size
+
+        # update preprocess resize to use self.input_size (already does)
+        self.preprocess = transforms.Compose(
+            [transforms.Resize((self.input_size, self.input_size)), transforms.ToTensor()]
+        )
+
         # Projector is only for DINO loss (not final tracking output).
         self.projector = nn.Sequential(
             nn.Linear(self.encoder_dim, DINO_HIDDEN_DIM),
