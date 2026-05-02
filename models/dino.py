@@ -374,10 +374,54 @@ class DINODataset(Dataset):
             
             # Load images with path adjustment
             images_in_dir = sorted(coco.get("images", []), key=lambda x: x["id"])
+            # Build a filesystem map for this data_dir to tolerate different layouts
+            # (some datasets store images under per-video subfolders).
+            file_map = {}
+            basename_map = {}
+            for root, _, files in os.walk(data_dir):
+                for f in files:
+                    full = os.path.join(root, f)
+                    rel = os.path.relpath(full, data_dir)
+                    # store relative path and basename -> full path
+                    if rel not in file_map:
+                        file_map[rel] = full
+                    if f not in basename_map:
+                        basename_map[f] = full
+
             for im in images_in_dir:
                 new_id = im["id"] + id_offset
                 self.images.append(im)
-                self.image_paths.append(os.path.join(data_dir, im["file_name"]))
+                ann_fname = im.get("file_name")
+                resolved = None
+                # Try exact relative path listed in annotation
+                if ann_fname in file_map:
+                    resolved = file_map[ann_fname]
+                # Try basename match (handles images stored in subfolders)
+                elif os.path.basename(ann_fname) in basename_map:
+                    resolved = basename_map[os.path.basename(ann_fname)]
+                else:
+                    # Fallback: direct join (keeps previous behavior) if it exists
+                    candidate = os.path.join(data_dir, ann_fname)
+                    if os.path.exists(candidate):
+                        resolved = candidate
+
+                if resolved is None:
+                    # Last resort: try case-insensitive search for basename
+                    b = os.path.basename(ann_fname)
+                    for k, v in basename_map.items():
+                        if k.lower() == b.lower():
+                            resolved = v
+                            break
+
+                if resolved is None:
+                    # If still unresolved, warn and use the joined path (will raise later)
+                    resolved = os.path.join(data_dir, ann_fname)
+                    print(f"[DINODataset] Warning: could not resolve {ann_fname} under {data_dir}; using {resolved}")
+                else:
+                    if resolved != os.path.join(data_dir, ann_fname):
+                        print(f"[DINODataset] Resolved {ann_fname} -> {resolved}")
+
+                self.image_paths.append(resolved)
                 self.image_id_to_index[new_id] = len(self.image_paths) - 1
                 self.annotations_by_image[new_id] = []
             
