@@ -267,17 +267,18 @@ class DINODataset(Dataset):
 
     Supports any COCO-formatted dataset with images and bounding box annotations.
     Automatically detects shuttle/player from standard COCO categories.
-    Can combine multiple datasets (e.g., train + train_mog_reflect) into single loader.
+    Can load single dataset or combine multiple datasets into single loader.
     
     Supported datasets:
-    - data/input/train: Original training dataset
-    - data/input/train_mog_frames: MOG2-masked frames (better contrast)
-    - data/input/train_mog_reflect: Augmented dataset with horizontal reflections (2x size)
+    - data/input/train: Original training dataset (10K images)
+    - data/input/train_mog_frames: MOG2-masked frames (10K images, better contrast)
+    - data/input/train_mog_reflect: Augmented dataset (20K images, 10K original + 10K horizontally-flipped) [DEFAULT, RECOMMENDED]
 
     Parameters:
     - data_dir: str or list of str, path(s) to dataset directory/directories
     - annotations_file: str or list of str (optional), path(s) to COCO JSON files
       If not provided, auto-detects as "_annotations.coco.json" in each data_dir
+      Multi-dataset support: pass comma-separated paths or lists to train on combined datasets
 
     Returns a sample dict with:
     - image_path: original file path

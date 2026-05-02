@@ -42,8 +42,8 @@ def main():
     parser.add_argument("--mode", choices=["train", "track-frames", "track-video"], default="train")
     parser.add_argument(
         "--train-dir",
-        default="data/input/train,data/input/train_mog_reflect",
-        help="Training dataset directory or comma-separated list (default: both train and train_mog_reflect for maximum diversity)",
+        default="data/input/train_mog_reflect",
+        help="Training dataset directory or comma-separated list (default: train_mog_reflect, which has 20K augmented images; alternatives: train_mog_frames, train)",
     )
     parser.add_argument(
         "--annotations",

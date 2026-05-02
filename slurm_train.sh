@@ -8,13 +8,13 @@
 #   2) run-main   : run main loop in track-frames mode
 #
 # Quick usage:
-#   sbatch slurm_train.sh train-dino                      # Uses both train + train_mog_reflect (30K images, recommended for robust model)
+#   sbatch slurm_train.sh train-dino                      # Uses train_mog_reflect (20K augmented images)
 #   sbatch slurm_train.sh run-main
 #
 # Optional overrides at submit-time:
 #   sbatch --export=ALL,EPOCHS=60,BATCH_SIZE=8,LR=5e-5 slurm_train.sh train-dino
-#   sbatch --export=ALL,TRAIN_DIR=data/input/train_mog_reflect slurm_train.sh train-dino  # Use only augmented
-#   sbatch --export=ALL,TRAIN_DIR=data/input/train_mog_frames slurm_train.sh train-dino    # Use only baseline
+#   sbatch --export=ALL,TRAIN_DIR=data/input/train_mog_frames slurm_train.sh train-dino    # Use baseline only
+#   sbatch --export=ALL,TRAIN_DIR=data/input/train slurm_train.sh train-dino              # Use original only
 #   sbatch --export=ALL,FRAMES_DIR=data/input/my_frames,FRAME_LIMIT=500 slurm_train.sh run-main
 #
 # Monitor:
@@ -61,13 +61,13 @@ OUTPUT_ROOT="${DATA_ROOT}/output"
 
 # Current training data layout in this repo.
 # Options:
-#   data/input/train_mog_frames             (baseline, MOG2-masked frames, 10K images)
-#   data/input/train_mog_reflect            (augmented, 2x horizontal reflections, 20K images)
-#   data/input/train,data/input/train_mog_reflect  (both combined, 30K images) [DEFAULT, RECOMMENDED]
+#   data/input/train                (original training dataset, 10K images)
+#   data/input/train_mog_frames     (MOG2-masked frames, 10K images)
+#   data/input/train_mog_reflect    (augmented with horizontal reflections, 20K images) [DEFAULT, RECOMMENDED]
 #
-# Default uses both datasets for maximum training diversity and model robustness.
+# Default uses train_mog_reflect: 20K images (10K original + 10K horizontally-flipped augmented).
 # Annotation files are auto-detected as "_annotations.coco.json" in each directory.
-TRAIN_DIR="${TRAIN_DIR:-${INPUT_ROOT}/train,${INPUT_ROOT}/train_mog_reflect}"
+TRAIN_DIR="${TRAIN_DIR:-${INPUT_ROOT}/train_mog_reflect}"
 
 # For run-main mode (track-frames):
 # This should point to a directory of image frames (jpg/png).
