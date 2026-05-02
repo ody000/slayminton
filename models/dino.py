@@ -530,21 +530,7 @@ class DINODataset(Dataset):
         }
 
 
-class ViTEncoder(nn.Module):
-    """ViT backbone with a projection head on the class token embedding."""
 
-    def __init__(self, head: nn.Module, encoder: Optional[nn.Module] = None):
-        super().__init__()
-        if encoder is None:
-            self.encoder, self.encoder_dim = _create_vit_tiny()
-        else:
-            self.encoder = encoder
-            self.encoder_dim = getattr(encoder, "embed_dim", 192)
-        self.head = head
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        cls_token = _extract_cls_token(self.encoder, x)
-        return self.head(cls_token)
 
 
 def train_dino(
@@ -658,6 +644,31 @@ def train_dino(
             views = [v.to(device) for v in batch["crops_by_view"]]
             det_images = batch["det_images"].to(device)
             det_targets = batch["det_targets"].to(device)
+
+            # Ensure input tensors have spatial dimensions that are multiples
+            # of the encoder patch size (e.g., 14 for ViT-B/14). Some backbones
+            # require H and W to be divisible by patch size; resize here using
+            # bilinear interpolation so training tensors are compatible.
+            pe = getattr(student_model.encoder, "patch_embed", None)
+            patch_H = 16
+            if pe is not None:
+                ps = getattr(pe, "patch_size", None)
+                if isinstance(ps, (tuple, list)):
+                    patch_H = int(ps[0])
+                elif isinstance(ps, int):
+                    patch_H = ps
+
+            def _ensure_multiple(t: torch.Tensor, multiple: int) -> torch.Tensor:
+                # t: (B,C,H,W)
+                b, c, h, w = t.shape
+                if h % multiple == 0 and w % multiple == 0:
+                    return t
+                new_h = ((h + multiple - 1) // multiple) * multiple
+                new_w = ((w + multiple - 1) // multiple) * multiple
+                return F.interpolate(t, size=(new_h, new_w), mode="bilinear", align_corners=False)
+
+            views = [_ensure_multiple(v, patch_H) for v in views]
+            det_images = _ensure_multiple(det_images, patch_H)
 
             # Cosine LR update each step.
             lr_step = _cosine_anneal(learning_rate, learning_rate * 0.1, step_count, total_steps)
@@ -916,9 +927,7 @@ def visualize_training(
 # ---------------------------------------------------------------------
 
 
-def _build_tracker_model(device: torch.device) -> DINOTracker:
-    # Tiny factory so training setup stays clean.
-    return DINOTracker(device=device)
+
 
 
 def _dino_collate(batch: List[dict]):
@@ -981,14 +990,14 @@ def _evaluate_detector(model: DINOTracker, loader: DataLoader, device: torch.dev
         box_loss = (box_loss.sum(dim=-1) * conf_target).sum() / conf_target.sum().clamp(min=1.0)
         total_loss += float((conf_loss + box_loss).item())
 
-        # Convert normalized predictions back to XYWH in detector image space.
-        pred_xywh = _cxcywh_norm_to_xywh(
-            box_pred_norm.reshape(-1, 4), model.input_size, model.input_size
-        ).reshape_as(gt_boxes)
+        # Compute IoU in normalized coordinate space (0..1) to avoid needing
+        # matched absolute pixel sizes between dataset and backbone input.
+        pred_xywh_norm = _cxcywh_norm_to_xywh(box_pred_norm.reshape(-1, 4), 1.0, 1.0).reshape_as(box_target_norm)
+        gt_xywh_norm = _cxcywh_norm_to_xywh(box_target_norm.reshape(-1, 4), 1.0, 1.0).reshape_as(box_target_norm)
 
         for cls_idx, cls_name in enumerate(TRACKED_CLASSES):
             cls_has_gt = conf_target[:, cls_idx] > 0.5
-            cls_iou = _bbox_iou_xywh(pred_xywh[:, cls_idx], gt_boxes[:, cls_idx])
+            cls_iou = _bbox_iou_xywh(pred_xywh_norm[:, cls_idx], gt_xywh_norm[:, cls_idx])
             pred_conf[cls_name].extend(conf_pred[:, cls_idx].detach().cpu().numpy().tolist())
             pred_iou[cls_name].extend(cls_iou.detach().cpu().numpy().tolist())
             gt_exists[cls_name].extend(cls_has_gt.detach().cpu().numpy().astype(np.float32).tolist())
