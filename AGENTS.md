@@ -65,6 +65,13 @@
 	- Creates one timestamped output folder per input source under `data/output/`.
 	- Saves tracking JSON, structured rally JSON, rally statistics JSON, and PNG visualizations.
 
+- Visualization & run-time changes (recent):
+	- Consolidated visualization code into `scripts/visualizations.py` and removed the old `utils/visualization.py` duplicate.
+	- `main.py` now runs a full MP4 pipeline in `track-video` mode: frame extraction (`utils/video_io.extract_frames`) → MOG2 masking (`utils/video_io.apply_mog2_to_frames`) → DINO detection (`models/dino.DINOTracker.detect`) using mask frames for better contrast → rally/game-state analysis → output artifact writing.
+	- `draw_dino_boxes_with_heatmap` in `scripts/visualizations.py` can accept `mask_paths` and a runtime `court_corners` to precompute a stationary court-insert heatmap (player coverage) and overlay per-frame markers and DINO shuttle/player boxes.
+	- The run output now contains a `.temp` folder with `original_frames`, `mask_frames`, and an auto-generated `masked_frames` folder containing masked RGB frames annotated with bounding boxes. `main.py` calls a helper `create_masked_frames_from_run` to generate these at the end of a `track-video` run.
+	- The visualization pipeline uses mask-based dual-player blob detection (`detect_players`) and a stable assignment (`assign_players_stable`) to draw persistent P1/P2 boxes and build the court heatmaps.
+
 ## Integration Notes For Next Iteration
 - Replace `track-frames` directory scan in `main.py` with direct frame tensor stream from `utils/video_io.py` once available.
 - Optionally upgrade detector head to multi-instance predictions for two players when team-level tracking is needed.

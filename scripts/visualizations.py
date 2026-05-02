@@ -44,6 +44,7 @@ HM_BLUR      = 7        # → (15×15) Gaussian kernel
 PLAYER_STAMP = 6        # footprint radius in court-insert pixels
 
 INSERT_ALPHA = 0.82     # overlay opacity
+PLAYER_POS_SMOOTHING_ALPHA = 0.20  # lower = steadier, higher = more responsive
 
 # Court corners in VIDEO pixel coords: [TL, TR, BR, BL] clockwise.
 # When set, a homography maps player positions to a true top-down view.
@@ -166,10 +167,11 @@ def video_to_insert(cx: int, cy: int, frame_w: int, frame_h: int,
         pt = np.array([[[cx, cy]]], dtype=np.float32)
         mapped = cv2.perspectiveTransform(pt, H)[0][0]
         ix = int(np.clip(mapped[0], 0, INSERT_W - 1))
-        iy = int(np.clip(mapped[1], 0, INSERT_H - 1))
+        iy = int(np.clip(INSERT_H - 1 - mapped[1], 0, INSERT_H - 1))
     else:
         ix = _CX0 + int(cx * _CW / frame_w)
         iy = _CY0 + int(cy * _CH / frame_h)
+        iy = INSERT_H - 1 - (iy - _CY0)
         ix = int(np.clip(ix, 0, INSERT_W - 1))
         iy = int(np.clip(iy, 0, INSERT_H - 1))
     return ix, iy
@@ -258,28 +260,21 @@ def build_court_insert(
 ) -> np.ndarray:
     """
     Composite the two heatmaps onto a copy of the court background.
-    P1 → red channel  |  P2 → blue channel
-    Current positions marked with coloured dots.
+    The court coverage is rendered from the combined historical positions of
+    both players, and the current player positions are marked separately.
     """
     canvas = court_base.copy()
     blur   = HM_BLUR * 2 + 1
 
-    def overlay_hm(hm: np.ndarray, channel: int, color_bgr: tuple) -> None:
-        if hm.max() == 0:
-            return
-        blurred = cv2.GaussianBlur(hm, (blur, blur), 0)
-        norm    = cv2.normalize(blurred, None, 0.0, 1.0, cv2.NORM_MINMAX)
-        # Blend into matching channel + a faint tint in the others for contrast
-        for ch, strength in enumerate([0.15, 0.15, 0.15]):
-            strength = 0.85 if ch == channel else 0.10
-            canvas[:, :, ch] = np.clip(
-                canvas[:, :, ch].astype(np.float32) + norm * 180 * strength,
-                0, 255
-            ).astype(np.uint8)
-
-    # P1 → red (channel 2), P2 → blue (channel 0)
-    overlay_hm(hm_p1, 2, P1_COLOR)
-    overlay_hm(hm_p2, 0, P2_COLOR)
+    hm_total = hm_p1 + hm_p2
+    if hm_total.max() > 0:
+        blurred = cv2.GaussianBlur(hm_total, (blur, blur), 0)
+        hm_norm = cv2.normalize(blurred, None, 0.0, 1.0, cv2.NORM_MINMAX)
+        hm_pow = np.power(hm_norm, 0.75)
+        heat_u8 = np.clip(hm_pow * 255.0, 0, 255).astype(np.uint8)
+        heat_bgr = cv2.applyColorMap(heat_u8, cv2.COLORMAP_TURBO)
+        heat_bgr = cv2.GaussianBlur(heat_bgr, (11, 11), 0)
+        canvas = cv2.addWeighted(canvas, 0.70, heat_bgr, 0.38, 0)
 
     # Current player dots
     for pos, color, label in [
@@ -287,8 +282,8 @@ def build_court_insert(
         (p2_ipos, P2_COLOR, "P2"),
     ]:
         if pos is not None:
+            cv2.circle(canvas, pos, 7, (0, 0, 0),      2, cv2.LINE_AA)
             cv2.circle(canvas, pos, 5, color,         -1, cv2.LINE_AA)
-            cv2.circle(canvas, pos, 5, (0, 0, 0),      1, cv2.LINE_AA)
             cv2.putText(canvas, label,
                         (pos[0] + 6, pos[1] + 4),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.28, color, 1, cv2.LINE_AA)
@@ -302,6 +297,99 @@ def build_court_insert(
                 cv2.FONT_HERSHEY_SIMPLEX, 0.28, P2_COLOR, 1, cv2.LINE_AA)
 
     return canvas
+
+
+def draw_player_marker(canvas: np.ndarray, pos: tuple[int, int], color: tuple[int, int, int], label: str) -> None:
+    """Draw a filled player marker with a sharp black outline."""
+    cv2.circle(canvas, pos, 8, (0, 0, 0), 2, cv2.LINE_AA)
+    cv2.circle(canvas, pos, 5, color, -1, cv2.LINE_AA)
+    cv2.putText(canvas, label, (pos[0] + 6, pos[1] + 4),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.28, color, 1, cv2.LINE_AA)
+
+
+def _ema_point(prev: tuple[float, float] | None, current: tuple[float, float], alpha: float = 0.65) -> tuple[float, float]:
+    if prev is None:
+        return current
+    return (alpha * current[0] + (1.0 - alpha) * prev[0], alpha * current[1] + (1.0 - alpha) * prev[1])
+
+
+def precompute_player_court_heatmap(
+    mask_paths: list[str],
+    court_corners: np.ndarray,
+    frame_w: int,
+    frame_h: int,
+) -> tuple[np.ndarray, list[dict[str, object]]]:
+    """Build a stationary court coverage heatmap from all player positions."""
+    homography = compute_homography(frame_h, frame_w, court_corners)
+    hm_p1 = np.zeros((INSERT_H, INSERT_W), dtype=np.float32)
+    hm_p2 = np.zeros((INSERT_H, INSERT_W), dtype=np.float32)
+
+    prev_p1_pos: tuple[float, float] | None = None
+    prev_p2_pos: tuple[float, float] | None = None
+    last_p1_blob = None
+    last_p2_blob = None
+    p1_lost_count = 0
+    p2_lost_count = 0
+    frame_states: list[dict[str, object]] = []
+
+    for mask_path in mask_paths:
+        mask_bgr = cv2.imread(mask_path)
+        if mask_bgr is None:
+            frame_states.append({"p1_blob": None, "p2_blob": None, "p1_pos": None, "p2_pos": None})
+            continue
+
+        mask_gray = cv2.cvtColor(mask_bgr, cv2.COLOR_BGR2GRAY)
+        # Accept any non-zero foreground from MOG2 (robust to varying output)
+        mask_bin = (mask_gray > 0).astype('uint8') * 255
+        blobs = detect_players(mask_bin)
+        p1, p2 = assign_players_stable(blobs, prev_p1_pos, prev_p2_pos)
+
+        if p1 is None and last_p1_blob is not None and p1_lost_count < MAX_LOST_FRAMES:
+            p1 = last_p1_blob
+            p1_lost_count += 1
+        elif p1 is not None:
+            last_p1_blob = p1
+            p1_lost_count = 0
+
+        if p2 is None and last_p2_blob is not None and p2_lost_count < MAX_LOST_FRAMES:
+            p2 = last_p2_blob
+            p2_lost_count += 1
+        elif p2 is not None:
+            last_p2_blob = p2
+            p2_lost_count = 0
+
+        p1_pos = None
+        p2_pos = None
+        p1_blob_out = p1
+        p2_blob_out = p2
+
+        for blob, hm_acc, slot in [
+            (p1, hm_p1, "p1"),
+            (p2, hm_p2, "p2"),
+        ]:
+            if blob is None:
+                continue
+            _, cx, cy, _ = blob
+            ix, iy = video_to_insert(cx, cy, frame_w, frame_h, homography)
+            smoothed = _ema_point(
+                prev_p1_pos if slot == "p1" else prev_p2_pos,
+                (float(ix), float(iy)),
+                alpha=PLAYER_POS_SMOOTHING_ALPHA,
+            )
+            sx, sy = int(round(smoothed[0])), int(round(smoothed[1]))
+            cv2.circle(hm_acc, (sx, sy), PLAYER_STAMP, 1.0, -1)
+            if slot == "p1":
+                p1_pos = (sx, sy)
+                prev_p1_pos = smoothed
+            else:
+                p2_pos = (sx, sy)
+                prev_p2_pos = smoothed
+
+        frame_states.append({"p1_blob": p1_blob_out, "p2_blob": p2_blob_out, "p1_pos": p1_pos, "p2_pos": p2_pos})
+
+    court_base = draw_court_background()
+    stationary_insert = build_court_insert(court_base, hm_p1, hm_p2, None, None)
+    return stationary_insert, frame_states
 
 
 def paste_insert_bottom_right(frame: np.ndarray, insert: np.ndarray, alpha: float) -> None:
@@ -347,7 +435,7 @@ def orig_path_for(mask_path: str) -> str:
 # Setting court points
 # ─────────────────────────────────────────────────────────────────────────────
 
-def set_court_points(first_orig, video_id):
+def set_court_points(first_orig, video_id, save: bool = True):
     points = []
     first_frame = first_orig.copy()
 
@@ -401,6 +489,9 @@ def set_court_points(first_orig, video_id):
 
     print("Collected points:", points)
 
+    if not save:
+        return points
+
     # --- LOAD existing data ---
     if os.path.exists(STORED_COURT_POINTS_PATH):
         with open(STORED_COURT_POINTS_PATH, "r") as f:
@@ -415,12 +506,20 @@ def set_court_points(first_orig, video_id):
     with open(STORED_COURT_POINTS_PATH, "w") as f:
         json.dump(all_data, f, indent=4)
 
+    return points
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-video processing
 # ─────────────────────────────────────────────────────────────────────────────
 
-def process_video(video_id: str, mask_paths: list[str], fps: int = DEFAULT_FPS) -> None:
+def process_video(
+    video_id: str,
+    mask_paths: list[str],
+    fps: int = DEFAULT_FPS,
+    court_corners: np.ndarray | None = None,
+    use_saved_court_points: bool = False,
+) -> None:
     print(f"\n[{video_id}]  {len(mask_paths)} frames")
 
     first_orig = cv2.imread(orig_path_for(mask_paths[0]))
@@ -432,24 +531,21 @@ def process_video(video_id: str, mask_paths: list[str], fps: int = DEFAULT_FPS) 
     print(f"  court insert: {INSERT_W}×{INSERT_H} px  (ratio {INSERT_W/INSERT_H:.3f}, "
           f"real {COURT_WID_M}/{COURT_LEN_M}={COURT_WID_M/COURT_LEN_M:.3f})")
     
-    # if there is no saved data for the court points, set them manually
-    if os.path.exists(STORED_COURT_POINTS_PATH):
+    if court_corners is None and use_saved_court_points and os.path.exists(STORED_COURT_POINTS_PATH):
         with open(STORED_COURT_POINTS_PATH, "r") as f:
             all_data = json.load(f)
-    else:
-        all_data = {}
-    if video_id not in all_data or SET_COURT_POINTS:
-        set_court_points(first_orig, video_id)
+        saved_points = all_data.get(video_id)
+        if saved_points:
+            court_corners = np.array(saved_points, dtype=np.float32)
 
-    # reload json and set COURT_CORNERS_VIDEO
-    if os.path.exists(STORED_COURT_POINTS_PATH):
-        with open(STORED_COURT_POINTS_PATH, "r") as f:
-            all_data = json.load(f)
+    # Use explicit corners when provided by the caller; otherwise prompt the user.
+    if court_corners is None:
+        court_corners = np.array(
+            set_court_points(first_orig, video_id, save=False),
+            dtype=np.float32,
+        )
     else:
-        all_data = {}
-    court_corners = None
-    if video_id in all_data:
-        court_corners = np.array(all_data[video_id], dtype=np.float32)
+        court_corners = np.array(court_corners, dtype=np.float32)
     
     homography  = compute_homography(H, W, court_corners)
     court_base  = draw_court_background()
@@ -487,7 +583,9 @@ def process_video(video_id: str, mask_paths: list[str], fps: int = DEFAULT_FPS) 
         mask_gray = cv2.cvtColor(mask_bgr, cv2.COLOR_BGR2GRAY)
 
         # ── Detect & assign ──────────────────────────────────────────────────
-        blobs = detect_players(mask_gray)
+        # Accept any non-zero foreground from MOG2
+        mask_bin = (mask_gray > 0).astype('uint8') * 255
+        blobs = detect_players(mask_bin)
         p1, p2 = assign_players_stable(blobs, prev_p1_pos, prev_p2_pos)
 
         # ── Handle Persistence (Memory) ──────────────────────────────────────
@@ -547,6 +645,183 @@ def process_video(video_id: str, mask_paths: list[str], fps: int = DEFAULT_FPS) 
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# DINO Tracking Visualization
+# ─────────────────────────────────────────────────────────────────────────────
+
+def draw_dino_boxes_with_heatmap(
+    frame_paths: list,
+    tracking_results: list,
+    output_video_path: str,
+    fps: int = 30,
+    court_corners: np.ndarray | None = None,
+    mask_paths: list[str] | None = None,
+) -> None:
+    """
+    Generate annotated video with DINO bounding boxes and shuttle heatmap.
+    Uses the same visualization pattern as process_video (bboxes + heatmap overlay).
+    
+    Args:
+        frame_paths: List of original frame paths
+        tracking_results: List of tracking result dicts with player/shuttle detections
+        output_video_path: Path to save annotated video
+        fps: Frames per second
+    """
+    if not frame_paths:
+        print("[DINO_VIZ] no frames to visualize")
+        return
+    
+    first = cv2.imread(frame_paths[0])
+    if first is None:
+        print("[DINO_VIZ] cannot read first frame")
+        return
+    
+    H, W = first.shape[:2]
+    
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(output_video_path, fourcc, fps, (W, H))
+    stationary_insert = None
+    frame_states: list[dict[str, object]] = []
+    if court_corners is not None and mask_paths is not None:
+        stationary_insert, frame_states = precompute_player_court_heatmap(mask_paths, court_corners, W, H)
+    
+    PLAYER_COLOR = (0, 255, 0)    # Green
+    SHUTTLE_COLOR = (0, 0, 255)   # Red
+    
+    print(f"[DINO_VIZ] annotating {len(frame_paths)} frames @ {fps}fps {W}x{H}")
+    
+    for i, frame_path in enumerate(frame_paths):
+        frame = cv2.imread(frame_path)
+        if frame is None:
+            frame = np.zeros((H, W, 3), dtype=np.uint8)
+        
+        if i < len(tracking_results):
+            result = tracking_results[i]
+
+            state = frame_states[i] if frame_states and i < len(frame_states) else None
+
+            # Draw player bounding boxes from the mask-based tracking pass when available.
+            if state is not None:
+                for blob, color, label in [
+                    (state.get("p1_blob"), P1_COLOR, "P1"),
+                    (state.get("p2_blob"), P2_COLOR, "P2"),
+                ]:
+                    if blob is None:
+                        continue
+                    _, _, _, (bx, by, bw, bh) = blob
+                    cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), color, 2)
+                    cv2.putText(frame, label, (bx, max(by - 6, 12)),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
+            else:
+                # Fallback: draw the DINO player box if no mask-based dual tracking is available.
+                player_det = result.get("player")
+                if player_det and isinstance(player_det, (list, tuple)) and len(player_det) >= 5:
+                    _, x, y, h, w = player_det[0], int(player_det[1]), int(player_det[2]), int(player_det[3]), int(player_det[4])
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), PLAYER_COLOR, 2)
+                    cv2.putText(frame, "Player", (x, max(y - 6, 12)), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.55, PLAYER_COLOR, 2, cv2.LINE_AA)
+            
+            # Draw shuttle bounding box (red) and accumulate heatmap
+            shuttle_det = result.get("shuttle")
+            if shuttle_det and isinstance(shuttle_det, (list, tuple)) and len(shuttle_det) >= 5:
+                _, x, y, h, w = shuttle_det[0], int(shuttle_det[1]), int(shuttle_det[2]), int(shuttle_det[3]), int(shuttle_det[4])
+                cv2.rectangle(frame, (x, y), (x + w, y + h), SHUTTLE_COLOR, 2)
+                cv2.putText(frame, "Shuttle", (x, max(y - 6, 12)), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.55, SHUTTLE_COLOR, 2, cv2.LINE_AA)
+                # Mark the shuttle center without creating a heatmap trail.
+                cx, cy = x + w // 2, y + h // 2
+                cv2.circle(frame, (cx, cy), 4, SHUTTLE_COLOR, -1, cv2.LINE_AA)
+
+            if stationary_insert is not None:
+                insert = stationary_insert.copy()
+                if state is not None:
+                    p1_pos = state.get("p1_pos")
+                    p2_pos = state.get("p2_pos")
+                    if isinstance(p1_pos, tuple):
+                        draw_player_marker(insert, p1_pos, P1_COLOR, "P1")
+                    if isinstance(p2_pos, tuple):
+                        draw_player_marker(insert, p2_pos, P2_COLOR, "P2")
+                paste_insert_bottom_right(frame, insert, INSERT_ALPHA)
+        
+        writer.write(frame)
+        
+        if (i + 1) % max(1, fps) == 0 or (i + 1) == len(frame_paths):
+            print(f"[DINO_VIZ] frame {i + 1}/{len(frame_paths)}", end="\r")
+    
+    writer.release()
+    print(f"\n[DINO_VIZ] saved: {output_video_path}")
+
+
+def save_masked_frames_with_boxes(
+    frame_paths: list[str],
+    mask_paths: list[str],
+    tracking_results: list[dict],
+    out_dir: str,
+) -> None:
+    """
+    Create masked RGB frames (foreground only) and draw bounding boxes for
+    detected players and shuttles. Saves frames to `out_dir` with the same
+    basenames as the originals.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    SHUTTLE_COLOR = (0, 0, 255)
+
+    for i, (fp, mp) in enumerate(zip(frame_paths, mask_paths)):
+        frame = cv2.imread(fp)
+        mask_bgr = cv2.imread(mp)
+        if frame is None:
+            continue
+
+        if mask_bgr is None:
+            masked = np.zeros_like(frame)
+            mask_bin = None
+        else:
+            mask_gray = cv2.cvtColor(mask_bgr, cv2.COLOR_BGR2GRAY)
+            mask_bin = (mask_gray > 0).astype('uint8') * 255
+            masked = cv2.bitwise_and(frame, frame, mask=mask_bin)
+
+        # Draw mask-derived player boxes (top-2 blobs)
+        if mask_bgr is not None and mask_bin is not None:
+            blobs = detect_players(mask_bin)
+            for idx, blob in enumerate(blobs):
+                _, cx, cy, (bx, by, bw, bh) = blob
+                color = P1_COLOR if idx == 0 else P2_COLOR
+                label = "P1" if idx == 0 else "P2"
+                cv2.rectangle(masked, (bx, by), (bx + bw, by + bh), color, 2)
+                cv2.putText(masked, label, (bx, max(by - 6, 12)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
+
+        # Draw DINO-derived detections if available (shuttle / single player)
+        if i < len(tracking_results):
+            res = tracking_results[i]
+            # Player (fallback single-box)
+            player_det = res.get("player")
+            if player_det and isinstance(player_det, (list, tuple)) and len(player_det) >= 5:
+                try:
+                    _, px, py, ph, pw = player_det[0], int(player_det[1]), int(player_det[2]), int(player_det[3]), int(player_det[4])
+                    cv2.rectangle(masked, (px, py), (px + pw, py + ph), P1_COLOR, 2)
+                    cv2.putText(masked, "Player", (px, max(py - 6, 12)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, P1_COLOR, 2, cv2.LINE_AA)
+                except Exception:
+                    pass
+
+            # Shuttle
+            shuttle_det = res.get("shuttle")
+            if shuttle_det and isinstance(shuttle_det, (list, tuple)) and len(shuttle_det) >= 5:
+                try:
+                    _, sx, sy, sh, sw = shuttle_det[0], int(shuttle_det[1]), int(shuttle_det[2]), int(shuttle_det[3]), int(shuttle_det[4])
+                    cv2.rectangle(masked, (sx, sy), (sx + sw, sy + sh), SHUTTLE_COLOR, 2)
+                    cv2.putText(masked, "Shuttle", (sx, max(sy - 6, 12)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, SHUTTLE_COLOR, 2, cv2.LINE_AA)
+                except Exception:
+                    pass
+
+        out_path = os.path.join(out_dir, os.path.basename(fp))
+        cv2.imwrite(out_path, masked, [cv2.IMWRITE_JPEG_QUALITY, 95])
+
+    print(f"[MASKED_FRAMES] saved {len(os.listdir(out_dir))} frames → {out_dir}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -557,9 +832,45 @@ def main() -> None:
         return
     print(f"Found {len(groups)} video group(s)\n")
     for video_id, mask_paths in groups.items():
-        process_video(video_id, mask_paths)
+        process_video(video_id, mask_paths, use_saved_court_points=True)
     print(f"\nAll done.  Videos → {VIZ_OUT_PATH}/")
 
 
 if __name__ == "__main__":
     main()
+
+
+def create_masked_frames_from_run(run_output_dir: str) -> str:
+    """
+    Create a `.temp/masked_frames` folder for an existing run directory.
+    Expects:
+      - <run_output_dir>/.temp/original_frames/*.jpg
+      - <run_output_dir>/.temp/mask_frames/*.jpg
+      - <run_output_dir>/tracking_results.json
+
+    Returns the path to the created masked_frames directory.
+    """
+    run_output_dir = os.path.abspath(run_output_dir)
+    temp_dir = os.path.join(run_output_dir, ".temp")
+    orig_dir = os.path.join(temp_dir, "original_frames")
+    mask_dir = os.path.join(temp_dir, "mask_frames")
+    out_dir = os.path.join(temp_dir, "masked_frames")
+
+    if not os.path.isdir(orig_dir) or not os.path.isdir(mask_dir):
+        raise FileNotFoundError(f"Missing expected dirs in {run_output_dir}: original_frames or mask_frames")
+
+    tracking_path = os.path.join(run_output_dir, "tracking_results.json")
+    if not os.path.exists(tracking_path):
+        raise FileNotFoundError(f"Missing tracking_results.json in {run_output_dir}")
+
+    with open(tracking_path, "r", encoding="utf-8") as f:
+        results = json.load(f)
+
+    frame_files = sorted([p for p in os.listdir(orig_dir) if p.lower().endswith((".jpg", ".jpeg", ".png"))])
+    mask_files = sorted([p for p in os.listdir(mask_dir) if p.lower().endswith((".jpg", ".jpeg", ".png"))])
+
+    frame_paths = [os.path.join(orig_dir, p) for p in frame_files]
+    mask_paths = [os.path.join(mask_dir, p) for p in mask_files]
+
+    save_masked_frames_with_boxes(frame_paths, mask_paths, results, out_dir)
+    return out_dir
