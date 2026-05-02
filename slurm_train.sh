@@ -155,6 +155,22 @@ echo "Run Root:          ${RUN_ROOT}"
 echo "Started:           $(date)"
 echo "============================================"
 
+# Canonicalize relative dataset paths to absolute paths under PROJECT_ROOT
+if [[ "${TRAIN_DIR}" != /* ]]; then
+	TRAIN_DIR="${PROJECT_ROOT}/${TRAIN_DIR#./}"
+fi
+if [[ "${FRAMES_DIR}" != /* ]]; then
+	FRAMES_DIR="${PROJECT_ROOT}/${FRAMES_DIR#./}"
+fi
+
+# Quick data existence check (helps debug missing files on compute node)
+if [[ ! -d "${TRAIN_DIR}" ]]; then
+	echo "[SLURM][WARNING] TRAIN_DIR does not exist on node: ${TRAIN_DIR}"
+else
+	echo "[SLURM] TRAIN_DIR exists: ${TRAIN_DIR} (showing up to 5 files)"
+	ls -1 "${TRAIN_DIR}" | head -n 5 || true
+fi
+
 if [[ "${MODE}" == "train-dino" ]]; then
 	echo "[SLURM] Running DINO training"
 	echo "[SLURM] Train dir:        ${TRAIN_DIR}"
