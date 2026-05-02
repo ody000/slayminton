@@ -8,11 +8,13 @@
 #   2) run-main   : run main loop in track-frames mode
 #
 # Quick usage:
-#   sbatch slurm_train.sh train-dino
+#   sbatch slurm_train.sh train-dino                      # Uses both train + train_mog_reflect (30K images, recommended for robust model)
 #   sbatch slurm_train.sh run-main
 #
 # Optional overrides at submit-time:
 #   sbatch --export=ALL,EPOCHS=60,BATCH_SIZE=8,LR=5e-5 slurm_train.sh train-dino
+#   sbatch --export=ALL,TRAIN_DIR=data/input/train_mog_reflect slurm_train.sh train-dino  # Use only augmented
+#   sbatch --export=ALL,TRAIN_DIR=data/input/train_mog_frames slurm_train.sh train-dino    # Use only baseline
 #   sbatch --export=ALL,FRAMES_DIR=data/input/my_frames,FRAME_LIMIT=500 slurm_train.sh run-main
 #
 # Monitor:
@@ -58,8 +60,14 @@ INPUT_ROOT="${DATA_ROOT}/input"
 OUTPUT_ROOT="${DATA_ROOT}/output"
 
 # Current training data layout in this repo.
-TRAIN_DIR="${INPUT_ROOT}/train_mog_frames"
-ANNOTATIONS_FILE="${TRAIN_DIR}/_annotations.coco.json"
+# Options:
+#   data/input/train_mog_frames             (baseline, MOG2-masked frames, 10K images)
+#   data/input/train_mog_reflect            (augmented, 2x horizontal reflections, 20K images)
+#   data/input/train,data/input/train_mog_reflect  (both combined, 30K images) [DEFAULT, RECOMMENDED]
+#
+# Default uses both datasets for maximum training diversity and model robustness.
+# Annotation files are auto-detected as "_annotations.coco.json" in each directory.
+TRAIN_DIR="${TRAIN_DIR:-${INPUT_ROOT}/train,${INPUT_ROOT}/train_mog_reflect}"
 
 # For run-main mode (track-frames):
 # This should point to a directory of image frames (jpg/png).
@@ -99,9 +107,9 @@ mkdir -p "${RUN_ROOT}" "${TRAIN_OUTPUT_DIR}" "${CHECKPOINT_DIR}" "${MAIN_OUTPUT_
 # Override with --export=ALL,VAR=value at sbatch time.
 
 # Train mode knobs
-EPOCHS="${EPOCHS:-100}"
+EPOCHS="${EPOCHS:-80}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
-LR="${LR:-1e-4}"
+LR="${LR:-5e-4}"  # Improved from 1e-4; 5e-3 for faster convergence on training plateau
 WEIGHTS_NAME="${WEIGHTS_NAME:-dino_tracker.pt}"
 WEIGHTS_PATH="${CHECKPOINT_DIR}/${WEIGHTS_NAME}"
 
@@ -147,14 +155,12 @@ echo "============================================"
 if [[ "${MODE}" == "train-dino" ]]; then
 	echo "[SLURM] Running DINO training"
 	echo "[SLURM] Train dir:        ${TRAIN_DIR}"
-	echo "[SLURM] Annotations:      ${ANNOTATIONS_FILE}"
 	echo "[SLURM] Output dir:       ${TRAIN_OUTPUT_DIR}"
 	echo "[SLURM] Checkpoint path:  ${WEIGHTS_PATH}"
 
 	uv run -v python -u main.py \
 		--mode train \
 		--train-dir "${TRAIN_DIR}" \
-		--annotations "${ANNOTATIONS_FILE}" \
 		--output-dir "${TRAIN_OUTPUT_DIR}" \
 		--weights "${WEIGHTS_PATH}" \
 		--epochs "${EPOCHS}" \

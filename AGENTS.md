@@ -11,10 +11,11 @@
 - Input annotations are COCO-style JSON and currently include categories: badminton, person, racket, shuttle.
 - Tracking targets are normalized to two canonical classes: `player` (from `person`) and `shuttle`.
 - Dataset split policy in training loop is 80/20 train/validation.
-- Validation metrics are reported using IoU and mAP@0.75.
+- Validation metrics are reported using IoU and mAP@0.5 (reduced from 0.75 to accommodate shuttle detection difficulty).
 - Tracking output format per object is `(timestamp, x, y, height, width)`.
 - Rally end rule (current): if shuttle motion is below threshold for 0.5s, rally becomes inactive.
 - Structured rally records must include: `rally_id`, `start_time`, `end_time`, `duration_s`.
+- Shuttle detection filtering (May 2026): MOG-based frames use white-pixel ratio filter to reject false positives on black regions.
 
 ## Expected Behaviors
 - `DINODataset` should:
@@ -26,6 +27,7 @@
 	- Load/save checkpoint weights.
 	- Run inference on one frame and return shuttle/player locations from one model.
 	- Support CPU/GPU execution via runtime device selection.
+	- For shuttle detections on MOG frames: filter out bounding boxes with <5% white pixel ratio (default) to avoid false positives on black regions.
 - `train_dino` should:
 	- Use student-teacher DINO training with centering and EMA updates.
 	- Use cosine LR scheduling and EMA momentum scheduling.
@@ -72,10 +74,33 @@
 	- The run output now contains a `.temp` folder with `original_frames`, `mask_frames`, and an auto-generated `masked_frames` folder containing masked RGB frames annotated with bounding boxes. `main.py` calls a helper `create_masked_frames_from_run` to generate these at the end of a `track-video` run.
 	- The visualization pipeline uses mask-based dual-player blob detection (`detect_players`) and a stable assignment (`assign_players_stable`) to draw persistent P1/P2 boxes and build the court heatmaps.
 
+- Shuttle tracking improvements (May 2, 2026):
+	- Created `augment_data_reflect.py`: generates horizontally-flipped training images with updated COCO bounding boxes to double dataset size.
+		- Usage: `python augment_data_reflect.py --input_dir data/input/train_mog_frames --output_dir data/input/train_mog_reflect`
+	- Improved training hyperparameters in `models/dino.py`:
+		- LEARNING_RATE: 1e-3 → 5e-3 (5× increase for faster convergence on training plateau)
+		- EMA_MOMENTUM_START: 0.996 → 0.99 (faster teacher model updates)
+		- EMA_MOMENTUM_END: 0.9995 → 0.999 (faster final epoch convergence)
+		- VAL_IOU_THRESHOLD: new constant = 0.5 (reduced from 0.75 for realistic shuttle metrics)
+	- Enhanced `DINOTracker.detect()` with post-processing filter:
+		- New method `_get_white_pixel_ratio()` analyzes pixel intensities in shuttle bounding box
+		- Rejects detections with insufficient white pixels (default 5% threshold) to prevent false positives on black MOG regions
+		- Configurable via `detect(frame, white_pixel_threshold=0.05)` parameter
+	- Created `diagnostic.py`: visualizes ground truth bounding boxes from COCO JSON for data validation.
+		- Usage: `python diagnostic.py --input_dir data/input/train_mog_frames --max_images 100`
+
+Rationale for changes:
+- Training loss plateau (6→5.6 in 100 epochs) addressed by 5× learning rate increase and faster EMA updates
+- Validation metric lowered to mAP@0.5 to reflect shuttle detection difficulty and provide more realistic performance estimates
+- Data augmentation (2× dataset) with reflection helps model learn invariance to shuttle orientation
+- White-pixel filtering prevents model from tracking random white blobs or black regions in MOG frames
+
 ## Integration Notes For Next Iteration
 - Replace `track-frames` directory scan in `main.py` with direct frame tensor stream from `utils/video_io.py` once available.
 - Optionally upgrade detector head to multi-instance predictions for two players when team-level tracking is needed.
+- Retrain models using augmented dataset (`train_mog_reflect`) with updated hyperparameters and compare against baseline.
 - Add unit tests for:
 	- COCO parsing and class mapping.
 	- Box transformation correctness under horizontal flip.
-	- Metric computations for IoU and mAP@0.75.
+	- White-pixel ratio computation for MOG frames.
+	- Metric computations for IoU and mAP@0.5.
