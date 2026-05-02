@@ -29,8 +29,8 @@
 # Tune these for your account/queue policy.
 # If jobs stay pending too long, reduce time/mem/gpu requests.
 #SBATCH -p gpu
-#SBATCH --gres=gpu:4
-#SBATCH -n 16
+#SBATCH --gres=gpu:2
+#SBATCH -n 8
 #SBATCH --mem=64G
 #SBATCH -t 08:00:00
 #SBATCH -J slayminton
