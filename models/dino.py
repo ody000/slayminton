@@ -36,20 +36,20 @@ GLOBAL_CROP_SIZE = 384 # 720p-friendly
 LOCAL_CROP_SIZE = 128 # larger crops preserve more detail
 BATCH_SIZE = 16
 LEARNING_RATE = 5e-4  # Increased from 1e-3 to improve training convergence
-EPOCHS = 100
+EPOCHS = 75
 WEIGHT_DECAY = 1e-4
 DINO_OUT_DIM = 256
 DINO_HIDDEN_DIM = 512
-DINO_STUDENT_TEMP = 0.5
+DINO_STUDENT_TEMP = 0.2
 DINO_TEACHER_TEMP_START = 0.02
 DINO_TEACHER_TEMP_END = 0.08
 DINO_TEACHER_TEMP_WARMUP_EPOCHS = 10
-CENTER_MOMENTUM = 0.95  # Centering EMA momentum: 0.95 means strong stability (0.9 was causing collapse!)
+CENTER_MOMENTUM = 0.98  # Centering EMA momentum: 0.95 means strong stability (0.9 was causing collapse!)
 EMA_MOMENTUM_START = 0.993  
 EMA_MOMENTUM_END = 0.9995
-BOX_LOSS_WEIGHT = 0.2
-SSL_LOSS_WEIGHT = 5.0
-MIN_CONFIDENCE = 0.15
+BOX_LOSS_WEIGHT = 0.05
+SSL_LOSS_WEIGHT = 20.0
+MIN_CONFIDENCE = 0.25
 VAL_EVERY = 5
 VAL_IOU_THRESHOLD = 0.5  # Reduced from 0.75 for easier shuttle detection metrics
 
@@ -80,6 +80,7 @@ class DINOTracker(nn.Module):
         self,
         model_path: Optional[str] = None,
         weights_path: Optional[str] = None,
+        pretrained_backbone_path: Optional[str] = None,
         device: Optional[torch.device] = None,
         input_size: int = GLOBAL_CROP_SIZE,
     ):
@@ -88,7 +89,7 @@ class DINOTracker(nn.Module):
         self.input_size = input_size
 
         # One shared encoder for both SSL projection and detection.
-        self.encoder, self.encoder_dim = _create_vit_tiny()
+        self.encoder, self.encoder_dim = _create_vit_tiny(pretrained_weights_path=pretrained_backbone_path)
         # Projector is only for DINO loss (not final tracking output).
         self.projector = nn.Sequential(
             nn.Linear(self.encoder_dim, DINO_HIDDEN_DIM),
@@ -532,6 +533,9 @@ def train_dino(
     learning_rate=LEARNING_RATE,
     output_dir: str = "data/output",
     checkpoint_name: str = "dino_tracker.pt",
+    pretrained_backbone_path: Optional[str] = None,
+    freeze_backbone_epochs: int = 5,
+    backbone_lr_factor: float = 0.1,
 ):
     """Train DINO student/teacher with detector head using 80/20 train/val split.
 
@@ -566,7 +570,11 @@ def train_dino(
     )
 
     # Caller can pass custom models; otherwise create default student/teacher.
-    student_model = student if isinstance(student, DINOTracker) else _build_tracker_model(device)
+    if isinstance(student, DINOTracker):
+        student_model = student
+    else:
+        # Allow building a model that loads a pretrained backbone path.
+        student_model = DINOTracker(device=device, pretrained_backbone_path=pretrained_backbone_path)
     teacher_model = teacher if isinstance(teacher, DINOTracker) else copy.deepcopy(student_model)
     student_model.to(device)
     teacher_model.to(device)
@@ -594,7 +602,14 @@ def train_dino(
         collate_fn=_dino_collate,
     )
 
-    optimizer = torch.optim.AdamW(student_model.parameters(), lr=learning_rate, weight_decay=WEIGHT_DECAY)
+    # Optionally freeze backbone for the first few epochs and only train projector+detector.
+    if freeze_backbone_epochs and freeze_backbone_epochs > 0:
+        # disable encoder gradients initially
+        for p in student_model.encoder.parameters():
+            p.requires_grad = False
+
+    params_to_optimize = [p for p in student_model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(params_to_optimize, lr=learning_rate, weight_decay=WEIGHT_DECAY)
     total_steps = max(len(train_loader) * epochs, 1)
 
     history = TrainHistory(train_loss=[], val_loss=[], val_iou=[], val_map75=[], eval_epochs=[])
@@ -701,6 +716,20 @@ def train_dino(
             )
         else:
             print(f"[TRAIN] epoch {epoch + 1:03d}/{epochs} | train_loss={avg_train_loss:.4f}")
+
+        # Unfreeze backbone when we pass the freeze_backbone_epochs threshold.
+        if freeze_backbone_epochs and (epoch + 1) == freeze_backbone_epochs:
+            print(f"[TRAIN] unfreezing encoder parameters at epoch {epoch + 1}")
+            for p in student_model.encoder.parameters():
+                p.requires_grad = True
+            # Rebuild optimizer with a smaller LR for the backbone.
+            backbone_params = list(student_model.encoder.parameters())
+            other_params = [p for p in student_model.parameters() if p.requires_grad and p not in backbone_params]
+            param_groups = [
+                {"params": other_params, "lr": learning_rate},
+                {"params": backbone_params, "lr": learning_rate * backbone_lr_factor},
+            ]
+            optimizer = torch.optim.AdamW(param_groups, weight_decay=WEIGHT_DECAY)
 
     # Save both student and teacher so experiments are easy to resume/compare.
     ckpt_path = os.path.join(output_dir, checkpoint_name)
@@ -960,7 +989,7 @@ def _evaluate_detector(model: DINOTracker, loader: DataLoader, device: torch.dev
     return avg_loss, mean_iou, map75
 
 
-def _create_vit_tiny() -> Tuple[nn.Module, int]:
+def _create_vit_tiny(pretrained_weights_path: Optional[str] = None) -> Tuple[nn.Module, int]:
     """Create a ViT-tiny backbone via timm.
 
     Raises a clear error if timm is missing, since this project depends on it.
@@ -973,9 +1002,94 @@ def _create_vit_tiny() -> Tuple[nn.Module, int]:
             "timm is required for ViT backbone creation. Install via: pip install timm"
         ) from exc
 
-    encoder = timm.create_model("vit_tiny_patch16_224", pretrained=False, num_classes=0, dynamic_img_size=True)
-    embed_dim = getattr(encoder, "embed_dim", 192)
-    return encoder, embed_dim
+    # Prefer DINOv2 pretrained weights if available via torch.hub. The exact model
+    # name can be provided through the environment variable `DINOV2_MODEL`.
+    dinov2_model = os.environ.get("DINOV2_MODEL", "dinov2_vitb14")
+    try:
+        # Attempt to load DINOv2 from FacebookResearch hub. This returns a nn.Module
+        # compatible with timm-like ViT APIs in most cases.
+        import torch
+
+        print(f"[DINO] attempting to load pretrained backbone from dinov2: {dinov2_model}")
+        encoder = torch.hub.load("facebookresearch/dinov2", dinov2_model)
+        embed_dim = getattr(encoder, "embed_dim", None) or getattr(encoder, "num_features", None)
+        if embed_dim is None:
+            embed_dim = 768
+        print(f"[DINO] loaded dinov2 model {dinov2_model} (embed_dim={embed_dim})")
+        # If a local pretrained checkpoint path is provided, try to load it into
+        # the backbone. We attempt to be robust to common checkpoint wrappers.
+        if pretrained_weights_path and os.path.exists(pretrained_weights_path):
+            try:
+                ckpt = torch.load(pretrained_weights_path, map_location="cpu")
+                # Heuristics to extract state_dict
+                if isinstance(ckpt, dict):
+                    if "state_dict" in ckpt:
+                        sd = ckpt["state_dict"]
+                    elif "model" in ckpt:
+                        sd = ckpt["model"]
+                    else:
+                        sd = ckpt
+                else:
+                    sd = ckpt
+
+                # Remove common prefixes (module., backbone., encoder.) so keys match
+                def _strip_prefix(state_dict, prefixes=("module.", "backbone.", "encoder.")):
+                    out = {}
+                    for k, v in state_dict.items():
+                        new_k = k
+                        for p in prefixes:
+                            if new_k.startswith(p):
+                                new_k = new_k[len(p) :]
+                                break
+                        out[new_k] = v
+                    return out
+
+                sd_clean = _strip_prefix(sd)
+                try:
+                    encoder.load_state_dict(sd_clean, strict=False)
+                    print(f"[DINO] loaded pretrained weights from {pretrained_weights_path} into encoder")
+                except Exception as le:
+                    print(f"[DINO] warning: failed to strictly load pretrained backbone weights: {le}")
+            except Exception as e:
+                print(f"[DINO] warning: failed to read pretrained_weights_path {pretrained_weights_path}: {e}")
+
+        return encoder, embed_dim
+    except Exception as e:
+        # If torch.hub or network access is not available on the cluster/node,
+        # fallback to a timm-created ViT with ImageNet-pretrained weights when possible.
+        print(f"[DINO] could not load dinov2 via torch.hub: {e}. Falling back to timm ViT.")
+        # Try image-net pretrained tiny ViT as a reasonable fallback.
+        encoder = timm.create_model(
+            "vit_tiny_patch16_224", pretrained=True, num_classes=0, dynamic_img_size=True
+        )
+        embed_dim = getattr(encoder, "embed_dim", 192)
+        # Optionally load a local checkpoint into the timm encoder as well.
+        if pretrained_weights_path and os.path.exists(pretrained_weights_path):
+            try:
+                ckpt = torch.load(pretrained_weights_path, map_location="cpu")
+                sd = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
+                # strip common prefixes
+                def _strip_prefix(state_dict, prefixes=("module.", "backbone.", "encoder.")):
+                    out = {}
+                    for k, v in state_dict.items():
+                        new_k = k
+                        for p in prefixes:
+                            if new_k.startswith(p):
+                                new_k = new_k[len(p) :]
+                                break
+                        out[new_k] = v
+                    return out
+
+                sd_clean = _strip_prefix(sd)
+                try:
+                    encoder.load_state_dict(sd_clean, strict=False)
+                    print(f"[DINO] loaded pretrained weights from {pretrained_weights_path} into timm encoder")
+                except Exception as le:
+                    print(f"[DINO] warning: failed to strictly load pretrained backbone weights into timm encoder: {le}")
+            except Exception as e:
+                print(f"[DINO] warning: failed to read pretrained_weights_path {pretrained_weights_path}: {e}")
+
+        return encoder, embed_dim
 
 
 def _extract_cls_token(encoder: nn.Module, x: torch.Tensor) -> torch.Tensor:

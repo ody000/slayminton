@@ -107,11 +107,13 @@ mkdir -p "${RUN_ROOT}" "${TRAIN_OUTPUT_DIR}" "${CHECKPOINT_DIR}" "${MAIN_OUTPUT_
 # Override with --export=ALL,VAR=value at sbatch time.
 
 # Train mode knobs
-EPOCHS="${EPOCHS:-80}"
+EPOCHS="${EPOCHS:-75}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 LR="${LR:-5e-4}"  # faster convergence on training plateau
 WEIGHTS_NAME="${WEIGHTS_NAME:-dino_tracker.pt}"
 WEIGHTS_PATH="${CHECKPOINT_DIR}/${WEIGHTS_NAME}"
+# Which pretrained backbone to use (env override). Default uses DINOv2 base ViT/14.
+DINOV2_MODEL="${DINOV2_MODEL:-dinov2_vitb14}"
 
 # Run-main knobs
 FPS="${FPS:-30.0}"
@@ -148,6 +150,7 @@ echo "Job ID:            ${SLURM_JOB_ID}"
 echo "Mode:              ${MODE}"
 echo "Node:              $(hostname)"
 echo "Project Root:      ${PROJECT_ROOT}"
+echo "Pretrained model:  ${DINOV2_MODEL}"
 echo "Run Root:          ${RUN_ROOT}"
 echo "Started:           $(date)"
 echo "============================================"

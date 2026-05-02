@@ -52,6 +52,11 @@ def main():
     )
     parser.add_argument("--output-dir", default="data/output")
     parser.add_argument("--weights", default="data/output/dino_tracker.pt")
+    parser.add_argument(
+        "--pretrained-backbone",
+        default=None,
+        help="Path to local pretrained backbone weights (.pth) to load into the encoder (optional)",
+    )
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument(
@@ -114,6 +119,8 @@ def main():
             epochs=args.epochs,
             batch_size=args.batch_size,
             learning_rate=args.learning_rate,
+            pretrained_backbone_path=args.pretrained_backbone,
+            freeze_backbone_epochs=5,
             output_dir=args.output_dir,
             checkpoint_name=os.path.basename(args.weights),
         )
