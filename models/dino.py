@@ -44,6 +44,7 @@ DINO_STUDENT_TEMP = 0.8
 DINO_TEACHER_TEMP_START = 0.02
 DINO_TEACHER_TEMP_END = 0.05
 DINO_TEACHER_TEMP_WARMUP_EPOCHS = 10
+CENTER_MOMENTUM = 0.95  # Centering EMA momentum: 0.95 means strong stability (0.9 was causing collapse!)
 EMA_MOMENTUM_START = 0.993  
 EMA_MOMENTUM_END = 0.9995
 BOX_LOSS_WEIGHT = 1.0
@@ -538,9 +539,15 @@ def train_dino(
     is None, this builds models internally.
 
     Hyperparameters (May 2026 improvements):
-    - LEARNING_RATE: 5e-3 (5× increase for better convergence)
-    - EMA_MOMENTUM_START: 0.99, EMA_MOMENTUM_END: 0.999 (faster model updates)
+    - LEARNING_RATE: 1e-3 (faster convergence)
+    - EMA_MOMENTUM_START: 0.993, EMA_MOMENTUM_END: 0.9995 (stable teacher updates)
+    - CENTER_MOMENTUM: 0.95 (strong centering to prevent collapse; was 0.9 which is too weak)
     - VAL_IOU_THRESHOLD: 0.5 (reduced from 0.75 for realistic shuttle metrics)
+
+    Anti-collapse mechanisms:
+    - Centering EMA applied to all student outputs (not just teacher), with L2 normalization
+    - Teacher temperature warmup in first 10 epochs
+    - Batch-level center stabilization prevents mode collapse
 
     Dataset recommendations:
     - Use train_mog_frames for baseline (MOG2-masked, better contrast)
@@ -661,9 +668,14 @@ def train_dino(
             optimizer.step()
 
             with torch.no_grad():
-                # Update center and teacher weights (EMA from student).
-                batch_center = torch.cat(teacher_views, dim=0).mean(dim=0)
-                center = center * 0.9 + batch_center * 0.1
+                # Update center: compute from all student outputs for stability.
+                # Center prevents mode collapse by centering teacher targets.
+                all_student_outputs = torch.cat(student_outs, dim=0)
+                batch_center = all_student_outputs.mean(dim=0)
+                # Strong EMA momentum stabilizes predictions; use CENTER_MOMENTUM=0.95+
+                center = center * CENTER_MOMENTUM + batch_center * (1.0 - CENTER_MOMENTUM)
+                # L2 normalize center to prevent unbounded growth (optional but helps numerically)
+                center = center / (torch.norm(center, p=2, dim=-1, keepdim=True) + 1e-8)
 
                 ema_m = _cosine_anneal(EMA_MOMENTUM_START, EMA_MOMENTUM_END, step_count, total_steps)
                 for t_param, s_param in zip(teacher_model.parameters(), student_model.parameters()):
