@@ -546,6 +546,9 @@ def train_dino(
     pretrained_backbone_path: Optional[str] = None,
     freeze_backbone_epochs: int = 5,
     backbone_lr_factor: float = 0.1,
+    num_workers: int = 0,
+    debug_batches: int = 0,
+    log_every: int = 10,
 ):
     """Train DINO student/teacher with detector head using 80/20 train/val split.
 
@@ -597,19 +600,22 @@ def train_dino(
         f"[TRAIN] dataset_split train={len(train_subset)} val={len(val_subset)} "
         f"eval_every={VAL_EVERY}"
     )
+    print(f"[TRAIN] creating DataLoaders num_workers={num_workers} batch_size={batch_size}")
     train_loader = DataLoader(
         train_subset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=4,
+        num_workers=num_workers,
         collate_fn=_dino_collate,
+        pin_memory=False,
     )
     val_loader = DataLoader(
         val_subset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=4,
+        num_workers=num_workers,
         collate_fn=_dino_collate,
+        pin_memory=False,
     )
 
     # Optionally freeze backbone for the first few epochs and only train projector+detector.
@@ -640,10 +646,15 @@ def train_dino(
         else:
             teacher_temp = DINO_TEACHER_TEMP_END
 
+        batch_idx = 0
         for batch in train_loader:
             views = [v.to(device) for v in batch["crops_by_view"]]
             det_images = batch["det_images"].to(device)
             det_targets = batch["det_targets"].to(device)
+
+            if batch_idx == 0:
+                t0 = time.time()
+
 
             # Ensure input tensors have spatial dimensions that are multiples
             # of the encoder patch size (e.g., 14 for ViT-B/14). Some backbones
@@ -733,6 +744,16 @@ def train_dino(
 
             epoch_loss += float(loss.item())
             step_count += 1
+            batch_idx += 1
+
+            # Lightweight logging so long-running runs show progress.
+            if step_count % max(1, log_every) == 0:
+                print(f"[TRAIN] epoch {epoch+1}/{epochs} step {step_count} batch {batch_idx} loss={loss.item():.4f}")
+
+            # If debug_batches set, run only that many batches then exit epoch early.
+            if debug_batches and batch_idx >= debug_batches:
+                print(f"[TRAIN] debug_batches reached ({debug_batches}), breaking epoch early")
+                break
 
         avg_train_loss = epoch_loss / max(len(train_loader), 1)
         history.train_loss.append(avg_train_loss)
