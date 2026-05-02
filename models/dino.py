@@ -15,6 +15,7 @@ import json
 import math
 import os
 import random
+import time
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -652,10 +653,6 @@ def train_dino(
             det_images = batch["det_images"].to(device)
             det_targets = batch["det_targets"].to(device)
 
-            if batch_idx == 0:
-                t0 = time.time()
-
-
             # Ensure input tensors have spatial dimensions that are multiples
             # of the encoder patch size (e.g., 14 for ViT-B/14). Some backbones
             # require H and W to be divisible by patch size; resize here using
@@ -787,13 +784,10 @@ def train_dino(
             ]
             optimizer = torch.optim.AdamW(param_groups, weight_decay=WEIGHT_DECAY)
 
-    # Save both student and teacher so experiments are easy to resume/compare.
+    # Save student model (teacher is only for training, not needed for inference)
     ckpt_path = os.path.join(output_dir, checkpoint_name)
     student_model.save_checkpoint(ckpt_path)
-    teacher_ckpt_path = os.path.join(output_dir, f"teacher_{checkpoint_name}")
-    teacher_model.save_checkpoint(teacher_ckpt_path)
     print(f"[TRAIN] saved_checkpoint student={ckpt_path}")
-    print(f"[TRAIN] saved_checkpoint teacher={teacher_ckpt_path}")
 
     history_np = {
         "train_loss": np.asarray(history.train_loss, dtype=np.float32),
@@ -820,6 +814,7 @@ def train_dino(
 
 
 @torch.no_grad()
+@torch.no_grad()
 def visualize_training(
     student,
     teacher,
@@ -828,92 +823,24 @@ def visualize_training(
     history: Optional[TrainHistory] = None,
     save_dir: str = "data/output",
 ):
-    """Visualize qualitative predictions and metric curves.
-
+    """Minimal training visualization - only metric curves to save disk space.
+    
     Outputs:
-    - examples_student_teacher.png
-    - loss_curves.png
-    - metrics_curves.png
-
-    - show sample predictions for student and teacher
-    - show loss/metric curves over epochs
+    - loss_curves.png: training and validation loss over epochs
+    - metrics_curves.png: IoU and mAP metrics over epochs
+    
+    Removed: student/teacher PNG comparison (disk space optimization)
     """
     os.makedirs(save_dir, exist_ok=True)
     device = torch.device(device)
-
+    
     student.eval()
     teacher.eval()
-
-    # Qualitative panel: show student vs teacher boxes with GT overlay.
-    sample_count = min(9, len(dataset))
-    sample_indices = random.sample(range(len(dataset)), k=sample_count) if len(dataset) > 0 else []
-
-    fig, axes = plt.subplots(3, 3, figsize=(16, 12))
-    axes = axes.flatten()
-    for ax_idx in range(9):
-        ax = axes[ax_idx]
-        ax.axis("off")
-        if ax_idx >= sample_count:
-            continue
-
-        sample = dataset[sample_indices[ax_idx]]
-        img = sample["det_image"].unsqueeze(0).to(device)
-        gt = sample["gt_boxes_xywh"].cpu()
-
-        p_student = student.forward_detect(img)[0].cpu()
-        p_teacher = teacher.forward_detect(img)[0].cpu()
-
-        img_np = sample["det_image"].permute(1, 2, 0).cpu().numpy()
-        ax.imshow(np.clip(img_np, 0.0, 1.0))
-
-        colors = {"player": "lime", "shuttle": "cyan"}
-        for cls_idx, cls_name in enumerate(TRACKED_CLASSES):
-            gt_box = gt[cls_idx]
-            if gt_box.sum() > 0:
-                x, y, w, h = gt_box.tolist()
-                rect = plt.Rectangle((x, y), w, h, fill=False, edgecolor="yellow", linewidth=2)
-                ax.add_patch(rect)
-
-            s_conf = float(p_student[cls_idx, 0].item())
-            t_conf = float(p_teacher[cls_idx, 0].item())
-
-            s_box = _cxcywh_norm_to_xywh(
-                p_student[cls_idx, 1:].unsqueeze(0), student.input_size, student.input_size
-            )[0]
-            t_box = _cxcywh_norm_to_xywh(
-                p_teacher[cls_idx, 1:].unsqueeze(0), teacher.input_size, teacher.input_size
-            )[0]
-
-            if s_conf >= MIN_CONFIDENCE:
-                x, y, w, h = s_box.tolist()
-                rect = plt.Rectangle((x, y), w, h, fill=False, edgecolor=colors[cls_name], linewidth=1.6)
-                ax.add_patch(rect)
-                ax.text(x, max(0, y - 2), f"S:{cls_name}:{s_conf:.2f}", color=colors[cls_name], fontsize=8)
-
-            if t_conf >= MIN_CONFIDENCE:
-                x, y, w, h = t_box.tolist()
-                rect = plt.Rectangle(
-                    (x, y),
-                    w,
-                    h,
-                    fill=False,
-                    edgecolor="magenta",
-                    linewidth=1.2,
-                    linestyle="--",
-                )
-                ax.add_patch(rect)
-                ax.text(x, min(student.input_size - 8, y + h + 8), f"T:{t_conf:.2f}", color="magenta", fontsize=7)
-
-        ax.set_title(f"sample #{sample_indices[ax_idx]}")
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, "examples_student_teacher.png"), dpi=160)
-    plt.close(fig)
 
     if history is None:
         return
 
-    # Curves are intentionally simple for quick sanity checks during long runs.
+    # Save loss curves for quick sanity checks during long runs.
     fig = plt.figure(figsize=(8, 4))
     plt.plot(range(1, len(history.train_loss) + 1), history.train_loss, label="train loss")
     if history.eval_epochs and history.val_loss:
@@ -924,9 +851,10 @@ def visualize_training(
     plt.grid(alpha=0.25)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, "loss_curves.png"), dpi=160)
+    plt.savefig(os.path.join(save_dir, "loss_curves.png"), dpi=100)
     plt.close(fig)
 
+    # Save validation metric curves.
     fig = plt.figure(figsize=(8, 4))
     if history.eval_epochs and history.val_iou:
         plt.plot(history.eval_epochs, history.val_iou, marker="o", label="val IoU")
@@ -939,7 +867,7 @@ def visualize_training(
     plt.grid(alpha=0.25)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, "metrics_curves.png"), dpi=160)
+    plt.savefig(os.path.join(save_dir, "metrics_curves.png"), dpi=100)
     plt.close(fig)
 
 
@@ -947,8 +875,17 @@ def visualize_training(
 # Helper methods for box conversions, IoU, AP calculation, cosine annealing, and ViT feature extraction.
 # ---------------------------------------------------------------------
 
-
-
+def _strip_prefix(state_dict: dict, prefixes=("module.", "backbone.", "encoder.")) -> dict:
+    """Remove common checkpoint prefixes so keys match encoder state."""
+    out = {}
+    for k, v in state_dict.items():
+        new_k = k
+        for p in prefixes:
+            if new_k.startswith(p):
+                new_k = new_k[len(p) :]
+                break
+        out[new_k] = v
+    return out
 
 
 def _dino_collate(batch: List[dict]):
@@ -1086,18 +1023,6 @@ def _create_vit_tiny(pretrained_weights_path: Optional[str] = None) -> Tuple[nn.
                 else:
                     sd = ckpt
 
-                # Remove common prefixes (module., backbone., encoder.) so keys match
-                def _strip_prefix(state_dict, prefixes=("module.", "backbone.", "encoder.")):
-                    out = {}
-                    for k, v in state_dict.items():
-                        new_k = k
-                        for p in prefixes:
-                            if new_k.startswith(p):
-                                new_k = new_k[len(p) :]
-                                break
-                        out[new_k] = v
-                    return out
-
                 sd_clean = _strip_prefix(sd)
                 try:
                     encoder.load_state_dict(sd_clean, strict=False)
@@ -1122,18 +1047,6 @@ def _create_vit_tiny(pretrained_weights_path: Optional[str] = None) -> Tuple[nn.
             try:
                 ckpt = torch.load(pretrained_weights_path, map_location="cpu")
                 sd = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
-                # strip common prefixes
-                def _strip_prefix(state_dict, prefixes=("module.", "backbone.", "encoder.")):
-                    out = {}
-                    for k, v in state_dict.items():
-                        new_k = k
-                        for p in prefixes:
-                            if new_k.startswith(p):
-                                new_k = new_k[len(p) :]
-                                break
-                        out[new_k] = v
-                    return out
-
                 sd_clean = _strip_prefix(sd)
                 try:
                     encoder.load_state_dict(sd_clean, strict=False)

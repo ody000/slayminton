@@ -40,39 +40,13 @@ def main():
     print("pre_argparse")
     parser = argparse.ArgumentParser(description="Slayminton DINOv3 training + tracking")
     parser.add_argument("--mode", choices=["train", "track-frames", "track-video"], default="train")
-    parser.add_argument(
-        "--train-dir",
-        default="data/input/train_mog_reflect",
-        help="Training dataset directory or comma-separated list (default: train_mog_reflect, which has 20K augmented images; alternatives: train_mog_frames, train)",
-    )
-    parser.add_argument(
-        "--annotations",
-        default=None,
-        help="Path to COCO annotations JSON or comma-separated paths. Auto-detected if not provided (looks for _annotations.coco.json in each data_dir)",
-    )
+    parser.add_argument("--train-dir", default="data/input/train")
+    parser.add_argument("--annotations", default="data/input/train/_annotations.coco.json")
     parser.add_argument("--output-dir", default="data/output")
     parser.add_argument("--weights", default="data/output/dino_tracker.pt")
-    parser.add_argument(
-        "--pretrained-backbone",
-        default=None,
-        help="Path to local pretrained backbone weights (.pth) to load into the encoder (optional)",
-    )
-    parser.add_argument(
-        "--dinov2-model",
-        default=None,
-        help="Name of the DINOV2 model to load (e.g., dinov2_vitb14). If set, exported to DINOV2_MODEL env var.",
-    )
-    parser.add_argument("--num-workers", type=int, default=0, help="DataLoader num_workers (debug default 0)")
-    parser.add_argument("--debug-batches", type=int, default=0, help="If >0, run only this many batches per epoch (debug)")
-    parser.add_argument("--log-every", type=int, default=10, help="Log every N steps during training")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument(
-        "--learning-rate",
-        type=float,
-        default=5e-3,
-        help="Learning rate (default: 5e-3, improved from 1e-3 for better convergence)",
-    )
+    parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument(
         "--frames-dir",
         default="data/input/train",
@@ -101,27 +75,17 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[MAIN] device={device}")
 
-    # Respect requested DINOV2 model name via env var so model loader can pick it up.
-    if getattr(args, "dinov2_model", None):
-        os.environ["DINOV2_MODEL"] = args.dinov2_model
-
 
     # If in training mode, run DINOv3 training loop and exit.
     if args.mode == "train":
         print("[MAIN] entering training mode")
-        # Parse comma-separated dataset paths
-        train_dirs = [p.strip() for p in args.train_dir.split(",")]
-        annotations_files = None
-        if args.annotations:
-            annotations_files = [p.strip() for p in args.annotations.split(",")]
-        
-        # Build dataset from COCO annotations (supports single or multiple directories)
+        # Build dataset from COCO annotations
         dataset = DINODataset(
             device=device,
-            data_dir=train_dirs,
-            annotations_file=annotations_files,
+            data_dir=args.train_dir,
+            annotations_file=args.annotations,
         )
-        print(f"[MAIN] dataset_size={len(dataset)} train_dirs={train_dirs}")
+        print(f"[MAIN] dataset_size={len(dataset)} train_dir={args.train_dir}")
         # full training loop
         _, _, history = train_dino(
             student=None,
@@ -131,11 +95,6 @@ def main():
             epochs=args.epochs,
             batch_size=args.batch_size,
             learning_rate=args.learning_rate,
-            pretrained_backbone_path=args.pretrained_backbone,
-            num_workers=args.num_workers,
-            debug_batches=args.debug_batches,
-            log_every=args.log_every,
-            freeze_backbone_epochs=5,
             output_dir=args.output_dir,
             checkpoint_name=os.path.basename(args.weights),
         )
