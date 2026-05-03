@@ -589,8 +589,12 @@ def train_dino(
     output_dir: str = "data/output",
     checkpoint_name: str = "dino_tracker.pt",
     pretrained_backbone_path: Optional[str] = None,
-    freeze_backbone_epochs: int = 5,
+    freeze_backbone_epochs: int = 3,
     backbone_lr_factor: float = 0.1,
+    # LoRA fine-tuning options
+    use_lora: bool = False,
+    lora_r: int = 4,
+    lora_alpha: int = 16,
     num_workers: int = 0,
     debug_batches: int = 0,
     log_every: int = 10,
@@ -633,6 +637,10 @@ def train_dino(
     else:
         # Allow building a model that loads a pretrained backbone path.
         student_model = DINOTracker(device=device, pretrained_backbone_path=pretrained_backbone_path)
+    # Optionally apply LoRA adapters to encoder for lightweight fine-tuning.
+    if use_lora:
+        n_replaced = apply_lora_to_encoder(student_model.encoder, r=lora_r, alpha=lora_alpha)
+        print(f"[TRAIN] LoRA applied to encoder: replaced {n_replaced} Linear modules (r={lora_r}, alpha={lora_alpha})")
     teacher_model = teacher if isinstance(teacher, DINOTracker) else copy.deepcopy(student_model)
     student_model.to(device)
     teacher_model.to(device)
@@ -665,9 +673,13 @@ def train_dino(
 
     # Optionally freeze backbone for the first few epochs and only train projector+detector.
     if freeze_backbone_epochs and freeze_backbone_epochs > 0:
-        # disable encoder gradients initially
-        for p in student_model.encoder.parameters():
-            p.requires_grad = False
+        # Freeze encoder parameters but preserve LoRA adapter parameters (if present).
+        for name, param in student_model.encoder.named_parameters():
+            # Keep LoRA adapter params trainable by name convention (lora_A / lora_B)
+            if ("lora_A" in name) or ("lora_B" in name):
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
 
     params_to_optimize = [p for p in student_model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(params_to_optimize, lr=learning_rate, weight_decay=WEIGHT_DECAY)
@@ -817,10 +829,11 @@ def train_dino(
         # Unfreeze backbone when we pass the freeze_backbone_epochs threshold.
         if freeze_backbone_epochs and (epoch + 1) == freeze_backbone_epochs:
             print(f"[TRAIN] unfreezing encoder parameters at epoch {epoch + 1}")
-            for p in student_model.encoder.parameters():
-                p.requires_grad = True
-            # Rebuild optimizer with a smaller LR for the backbone.
-            backbone_params = list(student_model.encoder.parameters())
+            # Unfreeze all encoder params (including adapters); rebuild optimizer grouping
+            for name, param in student_model.encoder.named_parameters():
+                param.requires_grad = True
+            # Rebuild optimizer with a smaller LR for the backbone parameters.
+            backbone_params = [p for p in student_model.encoder.parameters() if p.requires_grad]
             other_params = [p for p in student_model.parameters() if p.requires_grad and p not in backbone_params]
             param_groups = [
                 {"params": other_params, "lr": learning_rate},
@@ -977,6 +990,16 @@ def _evaluate_detector(model: DINOTracker, loader: DataLoader, device: torch.dev
     for batch in loader:
         # Pure eval pass: no gradients, just metrics.
         images = batch["det_images"].to(device)
+        # Ensure evaluation images have spatial dims compatible with encoder patch size
+        pe = getattr(model.encoder, "patch_embed", None)
+        patch_H = 16
+        if pe is not None:
+            ps = getattr(pe, "patch_size", None)
+            if isinstance(ps, (tuple, list)):
+                patch_H = int(ps[0])
+            elif isinstance(ps, int):
+                patch_H = ps
+        images = _ensure_multiple_tensor(images, patch_H)
         targets = batch["det_targets"].to(device)
         gt_boxes = batch["gt_boxes_xywh"].to(device)
 
@@ -1140,6 +1163,21 @@ def _cosine_anneal(start: float, end: float, step: int, total_steps: int) -> flo
     return end - (end - start) * 0.5 * (1.0 + math.cos(math.pi * ratio))
 
 
+def _ensure_multiple_tensor(t: torch.Tensor, multiple: int) -> torch.Tensor:
+    """Resize a 4D image tensor so H and W are multiples of `multiple` using bilinear interpolation.
+
+    Leaves other tensor shapes unchanged.
+    """
+    if not isinstance(t, torch.Tensor) or t.dim() != 4:
+        return t
+    b, c, h, w = t.shape
+    if h % multiple == 0 and w % multiple == 0:
+        return t
+    new_h = ((h + multiple - 1) // multiple) * multiple
+    new_w = ((w + multiple - 1) // multiple) * multiple
+    return F.interpolate(t, size=(new_h, new_w), mode="bilinear", align_corners=False)
+
+
 def _xywh_to_cxcywh_norm(xywh: torch.Tensor, width: float, height: float) -> torch.Tensor:
     # Detector learns normalized center-format boxes.
     x, y, w, h = xywh.unbind(-1)
@@ -1213,3 +1251,78 @@ def _compute_ap_from_scores(
     # NumPy 2.x prefers trapezoid; NumPy 1.x only provides trapz.
     integrate = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
     return float(integrate(precision, recall))
+
+
+def _get_parent_module_by_name(module: nn.Module, full_name: str):
+    """Return (parent_module, attr_name) for a dotted module path inside `module`.
+
+    If not found, returns (None, None).
+    """
+    parts = full_name.split(".")
+    parent = module
+    for p in parts[:-1]:
+        if not hasattr(parent, p):
+            return None, None
+        parent = getattr(parent, p)
+    return parent, parts[-1]
+
+
+class LoRALinear(nn.Module):
+    """Lightweight LoRA adapter wrapper for an existing nn.Linear.
+
+    This keeps the original Linear as `orig` (frozen by default) and adds two
+    small adapter matrices `lora_A` and `lora_B`. Forward returns
+    orig(x) + scaling * (x @ lora_A @ lora_B).
+    """
+
+    def __init__(self, orig_linear: nn.Linear, r: int = 4, alpha: int = 16):
+        super().__init__()
+        self.orig = orig_linear
+        self.in_features = orig_linear.in_features
+        self.out_features = orig_linear.out_features
+        self.r = max(1, int(r))
+        self.lora_A = nn.Parameter(torch.zeros(self.in_features, self.r))
+        self.lora_B = nn.Parameter(torch.zeros(self.r, self.out_features))
+        self.scaling = float(alpha) / float(self.r) if self.r > 0 else 1.0
+
+        # Initialize adapters: A with kaiming, B zeros (common LoRA init)
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B)
+
+        # By default freeze original weights; adapter params remain trainable.
+        for p in self.orig.parameters():
+            p.requires_grad = False
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # original output
+        orig_out = self.orig(x)
+        # Compute LoRA delta: (.., in) @ (in, r) -> (.., r) then @ (r, out) -> (.., out)
+        lora_inter = torch.matmul(x, self.lora_A)
+        lora_out = torch.matmul(lora_inter, self.lora_B) * (self.scaling)
+        return orig_out + lora_out
+
+
+def apply_lora_to_encoder(encoder: nn.Module, r: int = 4, alpha: int = 16, min_dim: int = 64) -> int:
+    """Replace suitable nn.Linear modules inside `encoder` with LoRA-wrapped versions.
+
+    Heuristic: replace Linear layers whose in/out feature sizes are >= `min_dim`.
+    Returns number of modules replaced.
+    """
+    replaced = 0
+    # Collect linear module names first to avoid mutation while iterating
+    linear_names = [name for name, m in encoder.named_modules() if isinstance(m, nn.Linear)]
+    for full_name in linear_names:
+        parent, attr = _get_parent_module_by_name(encoder, full_name)
+        if parent is None:
+            continue
+        orig = getattr(parent, attr)
+        # Skip small matrices and adapters already applied
+        if getattr(orig, "in_features", 0) < min_dim or getattr(orig, "out_features", 0) < min_dim:
+            continue
+        # Avoid double-wrapping
+        if isinstance(orig, LoRALinear):
+            continue
+        # Replace module
+        setattr(parent, attr, LoRALinear(orig, r=r, alpha=alpha))
+        replaced += 1
+    return replaced

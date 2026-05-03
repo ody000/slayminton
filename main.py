@@ -47,6 +47,20 @@ def main():
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
+    # LoRA fine-tuning flags (can be enabled via env USE_LORA=1 in slurm_train.sh)
+    parser.add_argument(
+        "--use-lora",
+        action="store_true",
+        default=(os.environ.get("USE_LORA", "0") == "1"),
+        help="Enable LoRA adapter fine-tuning on the encoder (lightweight)",
+    )
+    parser.add_argument("--lora-r", type=int, default=int(os.environ.get("LORA_R", "4")), help="LoRA rank r")
+    parser.add_argument(
+        "--lora-alpha",
+        type=int,
+        default=int(os.environ.get("LORA_ALPHA", "16")),
+        help="LoRA alpha scaling",
+    )
     parser.add_argument(
         "--frames-dir",
         default="data/input/train",
@@ -97,6 +111,9 @@ def main():
             learning_rate=args.learning_rate,
             output_dir=args.output_dir,
             checkpoint_name=os.path.basename(args.weights),
+            use_lora=args.use_lora,
+            lora_r=args.lora_r,
+            lora_alpha=args.lora_alpha,
         )
 
         print("[MAIN] training_complete")

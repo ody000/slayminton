@@ -114,6 +114,10 @@ WEIGHTS_NAME="${WEIGHTS_NAME:-dino_tracker.pt}"
 WEIGHTS_PATH="${CHECKPOINT_DIR}/${WEIGHTS_NAME}"
 # Which pretrained backbone to use (env override). Default uses DINOv2 base ViT/14.
 DINOV2_MODEL="${DINOV2_MODEL:-dinov2_vitb14}"
+# LoRA env knobs (enable by exporting USE_LORA=1 at sbatch time)
+USE_LORA="${USE_LORA:-0}"
+LORA_R="${LORA_R:-4}"
+LORA_ALPHA="${LORA_ALPHA:-16}"
 
 # Run-main knobs
 FPS="${FPS:-30.0}"
@@ -177,6 +181,13 @@ if [[ "${MODE}" == "train-dino" ]]; then
 	echo "[SLURM] Output dir:       ${TRAIN_OUTPUT_DIR}"
 	echo "[SLURM] Checkpoint path:  ${WEIGHTS_PATH}"
 
+	# Build base command and append LoRA flags conditionally
+	if [[ "${USE_LORA}" == "1" ]]; then
+		UV_CMD_LORA=" --use-lora --lora-r ${LORA_R} --lora-alpha ${LORA_ALPHA}"
+	else
+		UV_CMD_LORA=" --lora-r ${LORA_R} --lora-alpha ${LORA_ALPHA}"
+	fi
+
 	uv run -v python -u main.py \
 		--mode train \
 		--train-dir "${TRAIN_DIR}" \
@@ -184,7 +195,7 @@ if [[ "${MODE}" == "train-dino" ]]; then
 		--weights "${WEIGHTS_PATH}" \
 		--epochs "${EPOCHS}" \
 		--batch-size "${BATCH_SIZE}" \
-		--learning-rate "${LR}"
+		--learning-rate "${LR}" ${UV_CMD_LORA}
 
 	echo "[SLURM] train-dino complete"
 	echo "[SLURM] Artifacts are in: ${RUN_ROOT}"
