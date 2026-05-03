@@ -867,7 +867,8 @@ def train_dino(
                 param.requires_grad = True
             # Rebuild optimizer with a smaller LR for the backbone parameters.
             backbone_params = [p for p in student_model.encoder.parameters() if p.requires_grad]
-            other_params = [p for p in student_model.parameters() if p.requires_grad and p not in backbone_params]
+            backbone_param_ids = {id(p) for p in backbone_params}
+            other_params = [p for p in student_model.parameters() if p.requires_grad and id(p) not in backbone_param_ids]
             param_groups = [
                 {"params": other_params, "lr": learning_rate},
                 {"params": backbone_params, "lr": learning_rate * backbone_lr_factor},
