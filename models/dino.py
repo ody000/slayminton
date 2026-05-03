@@ -602,6 +602,9 @@ def train_dino(
     use_lora_modules: Optional[List[str]] = None,
     lora_min_dim: int = 64,
     use_amp: bool = False,
+    # LR scheduler options
+    end_learning_rate: Optional[float] = None,
+    lr_warmup_epochs: int = 0,
 ):
     """Train DINO student/teacher with detector head using 80/20 train/val split.
 
@@ -696,6 +699,8 @@ def train_dino(
     params_to_optimize = [p for p in student_model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(params_to_optimize, lr=learning_rate, weight_decay=WEIGHT_DECAY)
     total_steps = max(len(train_loader) * epochs, 1)
+    # Determine end LR for decay
+    end_lr = float(end_learning_rate) if end_learning_rate is not None else float(learning_rate * 0.1)
 
     history = TrainHistory(train_loss=[], val_loss=[], val_iou=[], val_map75=[], eval_epochs=[])
     # DINO centering buffer stabilizes teacher targets.
@@ -749,8 +754,15 @@ def train_dino(
             views = [_ensure_multiple(v, patch_H) for v in views]
             det_images = _ensure_multiple(det_images, patch_H)
 
-            # Cosine LR update each step.
-            lr_step = _cosine_anneal(learning_rate, learning_rate * 0.1, step_count, total_steps)
+            # LR scheduling: optional linear warmup (by epoch count) then cosine decay to end_lr
+            warmup_steps = max(1, lr_warmup_epochs * max(len(train_loader), 1))
+            if step_count < warmup_steps and lr_warmup_epochs > 0:
+                lr_step = float(learning_rate) * float(step_count) / float(max(1, warmup_steps))
+            else:
+                # cosine schedule after warmup; adjust step index and total for decay portion
+                decay_step = max(0, step_count - warmup_steps)
+                decay_total = max(1, total_steps - warmup_steps)
+                lr_step = _cosine_anneal(learning_rate, end_lr, decay_step, decay_total)
             for param_group in optimizer.param_groups:
                 param_group["lr"] = lr_step
 

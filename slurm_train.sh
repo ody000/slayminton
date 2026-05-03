@@ -120,6 +120,9 @@ LORA_R="${LORA_R:-4}"
 LORA_ALPHA="${LORA_ALPHA:-16}"
 # AMP toggle (no-op unless main.py/train_dino support enabled)
 USE_AMP="${USE_AMP:-0}"
+# Learning rate scheduler knobs
+MIN_LEARNING_RATE="${MIN_LEARNING_RATE:-}"
+LR_WARMUP_EPOCHS="${LR_WARMUP_EPOCHS:-0}"
 # Default number of dataloader workers for training
 NUM_WORKERS="${NUM_WORKERS:-4}"
 
@@ -203,6 +206,16 @@ if [[ "${MODE}" == "train-dino" ]]; then
 		UV_CMD_LORA=" --lora-r ${LORA_R} --lora-alpha ${LORA_ALPHA}"
 	fi
 
+	# Learning-rate scheduler flags
+	UV_CMD_LR=""
+	if [[ -n "${MIN_LEARNING_RATE}" ]]; then
+		UV_CMD_LR=" --min-learning-rate ${MIN_LEARNING_RATE}"
+	fi
+	UV_CMD_WARMUP=""
+	if [[ -n "${LR_WARMUP_EPOCHS}" && "${LR_WARMUP_EPOCHS}" != "0" ]]; then
+		UV_CMD_WARMUP=" --lr-warmup-epochs ${LR_WARMUP_EPOCHS}"
+	fi
+
 	# Build extra AMP flag if requested
 	EXTRA_AMP_FLAG=""
 	if [[ "${USE_AMP}" == "1" ]]; then
@@ -217,7 +230,7 @@ if [[ "${MODE}" == "train-dino" ]]; then
 		--weights "${WEIGHTS_PATH}" \
 		--epochs "${EPOCHS}" \
 		--batch-size "${BATCH_SIZE}" \
-		--learning-rate "${LR}" ${UV_CMD_LORA} ${EXTRA_AMP_FLAG}
+		--learning-rate "${LR}" ${UV_CMD_LORA} ${UV_CMD_LR} ${UV_CMD_WARMUP} ${EXTRA_AMP_FLAG}
 
 	echo "[SLURM] train-dino complete"
 	echo "[SLURM] Artifacts are in: ${RUN_ROOT}"

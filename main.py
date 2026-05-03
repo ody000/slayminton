@@ -80,6 +80,18 @@ def main():
         help="Enable AMP (automatic mixed precision) during training",
     )
     parser.add_argument(
+        "--min-learning-rate",
+        type=float,
+        default=None,
+        help="Minimum learning rate for scheduler (end of decay). If omitted, uses lr*0.1",
+    )
+    parser.add_argument(
+        "--lr-warmup-epochs",
+        type=int,
+        default=0,
+        help="Number of epochs to linearly warm up the LR before decay",
+    )
+    parser.add_argument(
         "--frames-dir",
         default="data/input/train",
         help="Directory containing RGB image frames for dry-run tracking mode",
@@ -135,6 +147,8 @@ def main():
             use_lora_modules=[s for s in args.lora_modules.split(",") if s] if args.lora_modules else None,
             lora_min_dim=args.lora_min_dim,
             use_amp=args.use_amp,
+            end_learning_rate=args.min_learning_rate,
+            lr_warmup_epochs=args.lr_warmup_epochs,
         )
 
         print("[MAIN] training_complete")
