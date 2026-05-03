@@ -18,7 +18,7 @@ GameState include:
 - hit_count: int - number of hits in the current rally
 """
 class GameState:
-    def __init__(self, inactive_timeout_s: float = 0.5, min_displacement_px: float = 2.0):
+    def __init__(self, inactive_timeout_s: float = 0.8, min_displacement_px: float = 3.0):
         # motion-based rally rule config.
         self.inactive_timeout_s = float(inactive_timeout_s)
         self.min_displacement_px = float(min_displacement_px)
@@ -34,10 +34,15 @@ class GameState:
 
         # Trajectory prediction-based hit detection.
         self.position_history: List[Tuple[float, float, float]] = []  # (timestamp, x, y)
-        self.history_max_len = 5  # keep last 5 positions for trajectory fitting
-        self.prediction_error_threshold = 10.0  # pixels; if prediction error > this, it's a hit
+        self.history_max_len = 8  # keep last positions for trajectory fitting
+        # Prediction error threshold for hit detection; leave moderate
+        self.prediction_error_threshold = 20.0  # pixels; if prediction error > this, it's a hit
         self.last_hit_timestamp: Optional[float] = None
         self.hit_cooldown_s = 0.2  # minimum time between consecutive hits (200ms)
+
+        # Motion-debounce to avoid single-frame jitter extending rallies.
+        self.motion_streak: int = 0
+        self.motion_required_streak: int = 2  # require this many frames of motion to accept it
 
     def start_rally(self):
         self.rally_active = True
@@ -88,7 +93,8 @@ class GameState:
         # Convert shuttle detection tuple to center coordinates. Returns None if no detection.
         if shuttle_det is None:
             return None
-        _, x, y, h, w = shuttle_det
+        # Expect shuttle_det as (timestamp, x, y, w, h)
+        _, x, y, w, h = shuttle_det
         return (x + 0.5 * w, y + 0.5 * h)
 
     def _fit_trajectory(self) -> Optional[Tuple[float, float, float]]:
@@ -162,6 +168,8 @@ class GameState:
 
             if self.last_center is None:
                 # First visible shuttle sample starts a candidate active period.
+                # Accept first detection as motion and start rally immediately.
+                self.motion_streak = self.motion_required_streak
                 self.last_motion_timestamp = timestamp
                 if not self.rally_active:
                     self.current_rally_start_timestamp = timestamp
@@ -172,15 +180,21 @@ class GameState:
                 dy = center[1] - self.last_center[1]
                 displacement = math.hypot(dx, dy)
 
+                # Motion-debounce: require multiple consecutive frames exceeding displacement.
                 if displacement >= self.min_displacement_px:
-                    self.last_motion_timestamp = timestamp
-                    if not self.rally_active:
-                        self.current_rally_start_timestamp = timestamp
-                        self.start_rally()
+                    self.motion_streak = min(self.motion_streak + 1, self.motion_required_streak)
+                    if self.motion_streak >= self.motion_required_streak:
+                        self.last_motion_timestamp = timestamp
+                        if not self.rally_active:
+                            self.current_rally_start_timestamp = timestamp
+                            self.start_rally()
 
-                    # Check for hit using trajectory prediction-based detector.
-                    if self._detect_hit(center, timestamp):
-                        self.record_hit()
+                        # Check for hit using trajectory prediction-based detector.
+                        if self._detect_hit(center, timestamp):
+                            self.record_hit()
+                else:
+                    # Reset streak on small movement (likely jitter)
+                    self.motion_streak = 0
 
             self.last_center = center
 
@@ -192,7 +206,8 @@ class GameState:
                 self.end_rally()
             elif (timestamp - self.last_motion_timestamp) >= self.inactive_timeout_s:
                 # Rally end is pinned to last observed motion timestamp.
-                self._record_rally_segment(self.last_motion_timestamp)
+                # Record the rally end at the current timestamp (when we observed inactivity).
+                self._record_rally_segment(timestamp)
                 self.end_rally()
 
         return self.rally_active

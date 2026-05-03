@@ -115,14 +115,6 @@ class DINOTracker(nn.Module):
             [transforms.Resize((self.input_size, self.input_size)), transforms.ToTensor()]
         )
 
-        # Projector is only for DINO loss (not final tracking output).
-        self.projector = nn.Sequential(
-            nn.Linear(self.encoder_dim, DINO_HIDDEN_DIM),
-            nn.GELU(),
-            nn.Linear(DINO_HIDDEN_DIM, DINO_HIDDEN_DIM),
-            nn.GELU(),
-            nn.Linear(DINO_HIDDEN_DIM, DINO_OUT_DIM),
-        )
         # Per class output: [confidence, cx, cy, w, h].
         self.detector_head = nn.Sequential(
             nn.Linear(self.encoder_dim, self.encoder_dim),
@@ -150,8 +142,7 @@ class DINOTracker(nn.Module):
 
     def forward_dino(self, x: torch.Tensor) -> torch.Tensor:
         # Student/teacher projection space used by SSL objective.
-        feat = self.encode(x)
-        return self.projector(feat)
+        raise RuntimeError("forward_dino is not available in detection-only mode")
 
     def forward_detect(self, x: torch.Tensor) -> torch.Tensor:
         # Detection head output shape: (B, num_classes, 5).
@@ -215,6 +206,7 @@ class DINOTracker(nn.Module):
         
         return float(white_pixels) / float(total_pixels)
 
+
     @torch.no_grad()
     def detect(
         self,
@@ -276,15 +268,9 @@ class DINOTracker(nn.Module):
             box_xywh = _cxcywh_norm_to_xywh(box_norm.unsqueeze(0), orig_w, orig_h)[0]
             x0, y0, w, h = [float(v.item()) for v in box_xywh]
             
-            # Post-processing: for shuttle, check white pixel ratio in MOG frames
-            if class_name == "shuttle" and original_frame is not None:
-                white_ratio = self._get_white_pixel_ratio(original_frame, (x0, y0, w, h))
-                if white_ratio < white_pixel_threshold:
-                    # Skip this detection if insufficient white pixels
-                    outputs[class_name] = None
-                    continue
             
-            outputs[class_name] = (timestamp, x0, y0, h, w)
+            # Return box as (timestamp, x, y, w, h) consistent with internal box_xywh
+            outputs[class_name] = (timestamp, x0, y0, w, h)
 
         return outputs
 
@@ -638,12 +624,13 @@ def train_dino(
         f"lr={learning_rate} output_dir={output_dir}"
     )
 
-    # Caller can pass custom models; otherwise create default student/teacher.
+    # Caller can pass a pre-built detection model; otherwise create default.
     if isinstance(student, DINOTracker):
         student_model = student
     else:
-        # Allow building a model that loads a pretrained backbone path.
+        # Build a model that can optionally load a pretrained backbone.
         student_model = DINOTracker(device=device, pretrained_backbone_path=pretrained_backbone_path)
+
     # Optionally apply LoRA adapters to encoder for lightweight fine-tuning.
     if use_lora:
         n_replaced = apply_lora_to_encoder(
@@ -654,14 +641,8 @@ def train_dino(
             module_name_patterns=use_lora_modules,
         )
         print(f"[TRAIN] LoRA applied to encoder: replaced {n_replaced} Linear modules (r={lora_r}, alpha={lora_alpha})")
-    teacher_model = teacher if isinstance(teacher, DINOTracker) else copy.deepcopy(student_model)
-    student_model.to(device)
-    teacher_model.to(device)
-    teacher_model.load_state_dict(student_model.state_dict(), strict=False)
-    for p in teacher_model.parameters():
-        p.requires_grad = False
 
-    # DDP is disabled in this deployment; models remain single-process
+    student_model.to(device)
 
     train_subset, val_subset = _split_dataset(dataset, train_ratio=0.8, seed=42)
     print(
@@ -703,8 +684,6 @@ def train_dino(
     end_lr = float(end_learning_rate) if end_learning_rate is not None else float(learning_rate * 0.1)
 
     history = TrainHistory(train_loss=[], val_loss=[], val_iou=[], val_map75=[], eval_epochs=[])
-    # DINO centering buffer stabilizes teacher targets.
-    center = torch.zeros(DINO_OUT_DIM, device=device)
 
     # AMP scaler if requested
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
@@ -714,25 +693,12 @@ def train_dino(
         student_model.train()
         epoch_loss = 0.0
 
-        # Warm up teacher temperature to avoid early collapse.
-        if epoch < DINO_TEACHER_TEMP_WARMUP_EPOCHS:
-            alpha = epoch / max(DINO_TEACHER_TEMP_WARMUP_EPOCHS - 1, 1)
-            teacher_temp = (
-                (1.0 - alpha) * DINO_TEACHER_TEMP_START + alpha * DINO_TEACHER_TEMP_END
-            )
-        else:
-            teacher_temp = DINO_TEACHER_TEMP_END
-
         batch_idx = 0
         for batch in train_loader:
-            views = [v.to(device) for v in batch["crops_by_view"]]
             det_images = batch["det_images"].to(device)
             det_targets = batch["det_targets"].to(device)
 
-            # Ensure input tensors have spatial dimensions that are multiples
-            # of the encoder patch size (e.g., 14 for ViT-B/14). Some backbones
-            # require H and W to be divisible by patch size; resize here using
-            # bilinear interpolation so training tensors are compatible.
+            # Ensure input tensors have spatial dimensions that are multiples of the encoder patch size
             pe = getattr(student_model.encoder, "patch_embed", None)
             patch_H = 16
             if pe is not None:
@@ -743,7 +709,6 @@ def train_dino(
                     patch_H = ps
 
             def _ensure_multiple(t: torch.Tensor, multiple: int) -> torch.Tensor:
-                # t: (B,C,H,W)
                 b, c, h, w = t.shape
                 if h % multiple == 0 and w % multiple == 0:
                     return t
@@ -751,11 +716,9 @@ def train_dino(
                 new_w = ((w + multiple - 1) // multiple) * multiple
                 return F.interpolate(t, size=(new_h, new_w), mode="bilinear", align_corners=False)
 
-            views = [_ensure_multiple(v, patch_H) for v in views]
             det_images = _ensure_multiple(det_images, patch_H)
 
-            # LR scheduling: optional linear warmup (by epoch count) then cosine decay to end_lr
-            # Compute warmup steps explicitly to avoid ambiguity when lr_warmup_epochs == 0
+            # LR scheduling (linear warmup then cosine decay)
             if lr_warmup_epochs and lr_warmup_epochs > 0:
                 warmup_steps = lr_warmup_epochs * len(train_loader)
             else:
@@ -764,39 +727,17 @@ def train_dino(
             if warmup_steps > 0 and step_count < warmup_steps:
                 lr_step = float(learning_rate) * float(step_count) / float(max(1, warmup_steps))
             else:
-                # cosine schedule after warmup; adjust step index and total for decay portion
                 decay_step = max(0, step_count - warmup_steps)
                 decay_total = max(1, total_steps - warmup_steps)
                 lr_step = _cosine_anneal(learning_rate, end_lr, decay_step, decay_total)
             for param_group in optimizer.param_groups:
                 param_group["lr"] = lr_step
 
-            with torch.no_grad():
-                # Teacher only processes global crops.
-                teacher_views = [teacher_model.forward_dino(views[i]) for i in range(NUM_GLOBAL_CROPS)]
-                teacher_probs = [F.softmax((tv - center) / teacher_temp, dim=-1).detach() for tv in teacher_views]
-
-            # Student sees global + local views.
-            # Use AMP autocast for student forward if enabled
+            # Detection forward
             autocast = torch.cuda.amp.autocast if use_amp else torch.cpu.amp.autocast
             with autocast(enabled=use_amp):
-                student_outs = [student_model.forward_dino(v) for v in views]
+                pred = student_model.forward_detect(det_images)
 
-            # Cross-view DINO objective, skipping exact same-view pairs.
-            ssl_loss = 0.0
-            num_pairs = 0
-            for i in range(NUM_GLOBAL_CROPS):
-                for j in range(len(student_outs)):
-                    if i == j:
-                        continue
-                    s_log = F.log_softmax(student_outs[j] / DINO_STUDENT_TEMP, dim=-1)
-                    pair_loss = -(teacher_probs[i] * s_log).sum(dim=-1).mean()
-                    ssl_loss = ssl_loss + pair_loss
-                    num_pairs += 1
-            ssl_loss = ssl_loss / max(num_pairs, 1)
-
-            # Supervised branch grounds representation on shuttle/player boxes.
-            pred = student_model.forward_detect(det_images)
             conf_pred = pred[..., 0]
             box_pred = pred[..., 1:]
             conf_target = det_targets[..., 0]
@@ -804,11 +745,9 @@ def train_dino(
 
             conf_loss = F.binary_cross_entropy(conf_pred, conf_target)
             box_loss = F.l1_loss(box_pred, box_target, reduction="none")
+            # weight box loss by target presence
             box_loss = (box_loss.sum(dim=-1) * conf_target).sum() / conf_target.sum().clamp(min=1.0)
-            det_loss = conf_loss + BOX_LOSS_WEIGHT * box_loss
-
-            # Joint objective = SSL + detection.
-            loss = SSL_LOSS_WEIGHT * ssl_loss + det_loss
+            loss = conf_loss + BOX_LOSS_WEIGHT * box_loss
 
             optimizer.zero_grad()
             if use_amp:
@@ -819,29 +758,13 @@ def train_dino(
                 loss.backward()
                 optimizer.step()
 
-            with torch.no_grad():
-                # Update center: compute from all student outputs for stability.
-                # Center prevents mode collapse by centering teacher targets.
-                all_student_outputs = torch.cat(student_outs, dim=0)
-                batch_center = all_student_outputs.mean(dim=0)
-                # Strong EMA momentum stabilizes predictions; use CENTER_MOMENTUM=0.95+
-                center = center * CENTER_MOMENTUM + batch_center * (1.0 - CENTER_MOMENTUM)
-                # L2 normalize center to prevent unbounded growth (optional but helps numerically)
-                center = center / (torch.norm(center, p=2, dim=-1, keepdim=True) + 1e-8)
-
-                ema_m = _cosine_anneal(EMA_MOMENTUM_START, EMA_MOMENTUM_END, step_count, total_steps)
-                for t_param, s_param in zip(teacher_model.parameters(), student_model.parameters()):
-                    t_param.data.mul_(ema_m).add_(s_param.data, alpha=(1.0 - ema_m))
-
             epoch_loss += float(loss.item())
             step_count += 1
             batch_idx += 1
 
-            # Lightweight logging so long-running runs show progress.
             if step_count % max(1, log_every) == 0:
                 print(f"[TRAIN] epoch {epoch+1}/{epochs} step {step_count} batch {batch_idx} loss={loss.item():.4f}")
 
-            # If debug_batches set, run only that many batches then exit epoch early.
             if debug_batches and batch_idx >= debug_batches:
                 print(f"[TRAIN] debug_batches reached ({debug_batches}), breaking epoch early")
                 break
@@ -867,15 +790,12 @@ def train_dino(
         # Unfreeze backbone when we pass the freeze_backbone_epochs threshold.
         if freeze_backbone_epochs and (epoch + 1) == freeze_backbone_epochs:
             print(f"[TRAIN] unfreezing encoder parameters at epoch {epoch + 1}")
-            # Unfreeze all encoder params (including adapters); rebuild optimizer grouping
             for name, param in student_model.encoder.named_parameters():
                 param.requires_grad = True
-            # Rebuild optimizer with a smaller LR for the backbone parameters.
             backbone_params = [p for p in student_model.encoder.parameters() if p.requires_grad]
             backbone_param_ids = {id(p) for p in backbone_params}
             other_params = [p for p in student_model.parameters() if p.requires_grad and id(p) not in backbone_param_ids]
 
-            # Build param groups only if non-empty to avoid empty-group optimizer errors
             param_groups = []
             if other_params:
                 param_groups.append({"params": other_params, "lr": learning_rate})
@@ -890,7 +810,6 @@ def train_dino(
                     lrs = []
                 print(f"[TRAIN] rebuilt optimizer: groups={len(param_groups)} other={len(other_params)} backbone={len(backbone_params)} lrs={lrs}")
             else:
-                # Fallback: collect all trainable params
                 params_to_optimize = [p for p in student_model.parameters() if p.requires_grad]
                 if not params_to_optimize:
                     raise RuntimeError("No parameters to optimize after unfreezing encoder")
@@ -915,7 +834,7 @@ def train_dino(
 
     visualize_training(
         student_model,
-        teacher_model,
+        None,
         dataset,
         device,
         history=history,
@@ -923,7 +842,8 @@ def train_dino(
     )
     print("[TRAIN] complete")
 
-    return student_model, teacher_model, history
+    # Return teacher as None since SSL teacher was removed for detection-only training
+    return student_model, None, history
 
 
 @torch.no_grad()
@@ -948,7 +868,8 @@ def visualize_training(
     device = torch.device(device)
     
     student.eval()
-    teacher.eval()
+    if teacher is not None:
+        teacher.eval()
 
     if history is None:
         return
