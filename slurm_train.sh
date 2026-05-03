@@ -140,17 +140,28 @@ cd "${PROJECT_ROOT}"
 # Pick ONE launcher section that matches your environment.
 # Keep the others commented out.
 
-# --- Option A: your local env shim (as in your previous scripts) ---
+# Prefer activating a project venv if present, otherwise fall back to user env shim.
+# This ensures `torch`/`torchrun` are available in the non-interactive SLURM job.
+if [[ -f "${PROJECT_ROOT}/.venv/bin/activate" ]]; then
+	echo "[SLURM] Activating project venv: ${PROJECT_ROOT}/.venv"
+	# shellcheck disable=SC1091
+	source "${PROJECT_ROOT}/.venv/bin/activate"
+	VENV_PY="${PROJECT_ROOT}/.venv/bin/python"
+	VENV_TORCHRUN="${PROJECT_ROOT}/.venv/bin/torchrun"
+elif [[ -f "${HOME}/.local/bin/env" ]]; then
+	echo "[SLURM] Sourcing user env shim: ${HOME}/.local/bin/env"
+	# shellcheck disable=SC1091
+	source "${HOME}/.local/bin/env"
+	VENV_PY="$(which python || true)"
+	VENV_TORCHRUN="$(which torchrun || true)"
+else
+	VENV_PY="$(which python || true)"
+	VENV_TORCHRUN="$(which torchrun || true)"
+fi
 
-source "${HOME}/.local/bin/env"
-
-
-# --- Option B: conda ---
-# source ~/.bashrc
-# conda activate <your_env_name>
-
-# --- Option C: venv ---
-# source .venv/bin/activate
+# Helpful PyTorch allocator settings to reduce fragmentation (can be overridden via sbatch --export)
+: ${PYTORCH_CUDA_ALLOC_CONF:=expandable_segments:True,max_split_size_mb:128}
+export PYTORCH_CUDA_ALLOC_CONF
 
 # Python runner command:
 # If you use uv, keep UV_RUN="uv run".
@@ -198,7 +209,14 @@ if [[ "${MODE}" == "train-dino" ]]; then
 	# Compose the runner: use torchrun when USE_DDP=1, otherwise run via uv/python
 	if [[ "${USE_DDP}" == "1" ]]; then
 		echo "[SLURM] USE_DDP=1 -> launching with torchrun (nproc_per_node=${NPROC_PER_NODE})"
-		RUNNER_CMD=(torchrun --nproc_per_node ${NPROC_PER_NODE} --standalone)
+		# Prefer torchrun from the activated venv, fall back to python -m torch.distributed.run, then system torchrun
+		if [[ -n "${VENV_TORCHRUN:-}" && -x "${VENV_TORCHRUN}" ]]; then
+			RUNNER_CMD=("${VENV_TORCHRUN}" --nproc_per_node ${NPROC_PER_NODE} --standalone)
+		elif [[ -n "${VENV_PY:-}" && -x "${VENV_PY}" ]]; then
+			RUNNER_CMD=("${VENV_PY}" -m torch.distributed.run --nproc_per_node ${NPROC_PER_NODE} --standalone)
+		else
+			RUNNER_CMD=(torchrun --nproc_per_node ${NPROC_PER_NODE} --standalone)
+		fi
 		# torchrun will set LOCAL_RANK per process; pass --use-ddp to main
 		EXTRA_DDP_FLAG=" --use-ddp"
 	else
