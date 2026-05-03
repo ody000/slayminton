@@ -51,7 +51,7 @@ EMA_MOMENTUM_END = 0.9995
 BOX_LOSS_WEIGHT = 0.05
 SSL_LOSS_WEIGHT = 20.0
 MIN_CONFIDENCE = 0.25
-VAL_EVERY = 2
+VAL_EVERY = 1
 VAL_IOU_THRESHOLD = 0.5  # Reduced from 0.75 for easier shuttle detection metrics
 
 TRACKED_CLASSES = ("player", "shuttle")
