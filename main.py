@@ -14,10 +14,12 @@ import cv2
 import numpy as np
 from PIL import Image
 import torch
+from collections import deque
 
 from core.analysis import Analysis
 from core.game_state import GameState
 from models.dino import DINODataset, DINOTracker, train_dino
+from models.tracknet import TrackNetTracker
 from utils.video_io import extract_frames, apply_mog2_to_frames
 
 
@@ -44,6 +46,16 @@ def main():
     parser.add_argument("--annotations", default="data/input/train/_annotations.coco.json")
     parser.add_argument("--output-dir", default="data/output")
     parser.add_argument("--weights", default="data/output/dino_tracker.pt")
+    parser.add_argument(
+        "--player-weights",
+        default="data/output/dino_tracker.pt",
+        help="Path to player detection weights (DINO)",
+    )
+    parser.add_argument(
+        "--shuttle-weights",
+        default="models/tracknet.pt",
+        help="Path to shuttle detection weights (TrackNet)",
+    )
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
@@ -187,9 +199,14 @@ def _run_track_frames(args, device):
     os.makedirs(run_output_dir, exist_ok=True)
     print(f"[MAIN] run_output_dir={run_output_dir}")
 
-    tracker = DINOTracker(
-        weights_path=args.weights if os.path.exists(args.weights) else None,
+    # Initialize trackers: DINO for players, TrackNet for shuttle
+    dino_tracker = DINOTracker(
+        weights_path=args.player_weights if os.path.exists(args.player_weights) else None,
         pretrained_backbone_path=args.pretrained_backbone_path,
+        device=device,
+    )
+    tracker = TrackNetTracker(
+        weights_path=args.shuttle_weights if os.path.exists(args.shuttle_weights) else None,
         device=device,
     )
     rally_tracker = GameState(
@@ -197,6 +214,8 @@ def _run_track_frames(args, device):
         min_displacement_px=args.min_shuttle_motion_px,
     )
     analysis = Analysis()
+
+    from collections import deque
 
     frame_files: List[str] = sorted(
         [
@@ -209,18 +228,29 @@ def _run_track_frames(args, device):
 
     results = []
     progress_interval = max(1, int(args.fps))
+    frame_buffer = deque(maxlen=3)
     for i, frame_path in enumerate(frame_files):
         # Convert frame index to seconds so timeout logic is meaningful.
         timestamp = float(i) / max(args.fps, 1e-6)
         frame = np.asarray(Image.open(frame_path).convert("RGB"))
-        det = tracker.detect(frame, timestamp=timestamp)
-        rally_active = rally_tracker.update(timestamp=timestamp, shuttle_det=det.get("shuttle"))
+        # add to temporal buffer for TrackNet (3-frame stack)
+        frame_buffer.append(frame)
+        if len(frame_buffer) == 3:
+            shuttle_input = list(frame_buffer)
+        else:
+            # pad by repeating the most recent frame
+            shuttle_input = [frame_buffer[0]] * 3 if frame_buffer else [frame, frame, frame]
+
+        # Player detection via DINO, shuttle via TrackNet (temporal stack)
+        player_det = dino_tracker.detect(frame, timestamp=timestamp)
+        shuttle_det = tracker.detect(shuttle_input, timestamp=timestamp)
+        rally_active = rally_tracker.update(timestamp=timestamp, shuttle_det=shuttle_det.get("shuttle"))
         results.append(
             {
                 "frame_path": frame_path,
                 "timestamp": timestamp,
-                "player": det.get("player"),
-                "shuttle": det.get("shuttle"),
+                "player": player_det.get("player"),
+                "shuttle": shuttle_det.get("shuttle"),
                 "rally_active": rally_active,
             }
         )
@@ -323,10 +353,15 @@ def _run_track_video(args, device):
             except Exception as e:
                 print(f"[MAIN] warning: court calibration GUI failed ({e})")
         
-        # Initialize tracker, game state, and analysis
-        tracker = DINOTracker(
-            weights_path=args.weights if os.path.exists(args.weights) else None,
+        # Initialize tracker, game state, and analysis (TrackNet uses original RGB frames)
+        # Initialize trackers: DINO for players (use mask when available), TrackNet for shuttle
+        dino_tracker = DINOTracker(
+            weights_path=args.player_weights if os.path.exists(args.player_weights) else None,
             pretrained_backbone_path=args.pretrained_backbone_path,
+            device=device,
+        )
+        tracker = TrackNetTracker(
+            weights_path=args.shuttle_weights if os.path.exists(args.shuttle_weights) else None,
             device=device,
         )
         rally_tracker = GameState(
@@ -340,25 +375,39 @@ def _run_track_video(args, device):
         results = []
         progress_interval = max(1, int(args.fps))
         
+        frame_buffer = deque(maxlen=3)
         for i, frame_path in enumerate(frame_paths):
             timestamp = float(i) / max(args.fps, 1e-6)
             frame = np.asarray(Image.open(frame_path).convert("RGB"))
             
-            # Use MOG2 mask frame for detection (better contrast for motion)
+            # Player detection: prefer mask frame for DINO if available, else use RGB
+            # build temporal stack for TrackNet
+            frame_buffer.append(frame)
+            if len(frame_buffer) == 3:
+                shuttle_input = list(frame_buffer)
+            else:
+                shuttle_input = [frame_buffer[0]] * 3 if frame_buffer else [frame, frame, frame]
+
+            player_input = None
             if i < len(mask_paths):
                 mask = cv2.imread(mask_paths[i], cv2.IMREAD_GRAYSCALE)
                 if mask is not None:
-                    # Convert grayscale mask to RGB by repeating channels
-                    frame = cv2.cvtColor(mask, cv2.COLOR_GRAY2RGB)
-            
-            det = tracker.detect(frame, timestamp=timestamp)
-            rally_active = rally_tracker.update(timestamp=timestamp, shuttle_det=det.get("shuttle"))
+                    player_input = cv2.cvtColor(mask, cv2.COLOR_GRAY2RGB)
+            if player_input is None:
+                player_input = frame
+
+            player_det = dino_tracker.detect(player_input, timestamp=timestamp)
+
+            # Shuttle detection via TrackNet on 3-frame RGB stack
+            shuttle_det = tracker.detect(shuttle_input, timestamp=timestamp)
+
+            rally_active = rally_tracker.update(timestamp=timestamp, shuttle_det=shuttle_det.get("shuttle"))
             results.append(
                 {
                     "frame_path": frame_path,
                     "timestamp": timestamp,
-                    "player": det.get("player"),
-                    "shuttle": det.get("shuttle"),
+                    "player": player_det.get("player"),
+                    "shuttle": shuttle_det.get("shuttle"),
                     "rally_active": rally_active,
                 }
             )

@@ -17,5 +17,4 @@
 data/output/*
 models/dinov2_vitb14_reg4_pretrain.pth
 *.pyc
-dino_tracker.pt
-dino_tracker(old).pt
+dino_tracker_old.pt

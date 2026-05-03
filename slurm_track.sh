@@ -1,6 +1,6 @@
 #!/bin/bash
 # Simple SBATCH script to run DINO tracking (headless)
-# Usage: sbatch slurm_track.sh /path/to/video.mp4 /path/to/dino_tracker.pt /path/to/dinov2_vitb14.pt /path/to/court_points.json
+# Usage: sbatch slurm_track.sh /path/to/video.mp4 /path/to/tracknet.pt /path/to/court_points.json
 
 #SBATCH --job-name=slay_track
 #SBATCH --output=slay_track-%j.out
@@ -12,8 +12,8 @@
 #SBATCH --mem=32G
 
 VIDEO_PATH=${1:-data/input/match_clip.mp4}
-WEIGHTS=${2:-dino_tracker.pt}
-BACKBONE=${3:-}
+SHUTTLE_WEIGHTS=${2:-tracknet.pt}
+PLAYER_WEIGHTS=${3:-data/output/dino_tracker.pt}
 COURT_POINTS=${4:-data/input/court_points.json}
 
 echo "Running slayminton track job"
@@ -21,12 +21,7 @@ echo "VIDEO_PATH=${VIDEO_PATH} WEIGHTS=${WEIGHTS} BACKBONE=${BACKBONE} COURT_POI
 
 # Prefer running with `uv` if available on this cluster (common wrapper on some clusters).
 # Otherwise, use a provided VENV_PATH or PYTHON_BIN environment variable, or fall back to system python3.
-export DINOV2_MODEL=dinov2_vitb14
-
-PY_ARGS=(--mode track-video --video-path "${VIDEO_PATH}" --weights "${WEIGHTS}" --fps 30)
-if [[ -n "${BACKBONE}" ]]; then
-  PY_ARGS+=(--pretrained-backbone-path "${BACKBONE}")
-fi
+PY_ARGS=(--mode track-video --video-path "${VIDEO_PATH}" --shuttle-weights "${SHUTTLE_WEIGHTS}" --player-weights "${PLAYER_WEIGHTS}" --fps 30)
 if [[ -n "${COURT_POINTS}" ]]; then
   PY_ARGS+=(--court-points-file "${COURT_POINTS}")
 fi
