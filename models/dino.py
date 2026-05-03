@@ -1107,57 +1107,6 @@ def _create_vit_tiny(pretrained_weights_path: Optional[str] = None) -> Tuple[nn.
 
         return encoder, embed_dim
 
-
-    def _create_vit_by_embed_dim(embed_dim: int, pretrained_weights_path: Optional[str] = None) -> Tuple[nn.Module, int]:
-        """Create a ViT backbone matching the specified embedding dimension.
-
-        This attempts to create a model whose patch/embed dims align with a
-        provided checkpoint to avoid size-mismatch errors when loading state_dicts.
-        """
-        try:
-            import timm
-        except ImportError as exc:
-            raise ImportError("timm is required for ViT backbone creation") from exc
-
-        # Map common embed dims to timm model names or dinov2 hub names.
-        if embed_dim == 192:
-            model_name = "vit_tiny_patch16_224"
-        elif embed_dim == 384:
-            model_name = "vit_small_patch16_224"
-        elif embed_dim == 768:
-            # Prefer DINOv2 ViT-B/14 if available via hub
-            dinov2_model = os.environ.get("DINOV2_MODEL", "dinov2_vitb14")
-            try:
-                import torch
-
-                encoder = torch.hub.load("facebookresearch/dinov2", dinov2_model)
-                ed = getattr(encoder, "embed_dim", None) or getattr(encoder, "num_features", None)
-                if ed is None:
-                    ed = 768
-                return encoder, int(ed)
-            except Exception:
-                model_name = "vit_base_patch16_224"
-        else:
-            # Fallback: choose base size
-            model_name = "vit_base_patch16_224"
-
-        encoder = timm.create_model(model_name, pretrained=True, num_classes=0, dynamic_img_size=True)
-        embed_dim_out = getattr(encoder, "embed_dim", getattr(encoder, "num_features", None) or embed_dim)
-        # Optionally attempt to load local pretrained weights
-        if pretrained_weights_path and os.path.exists(pretrained_weights_path):
-            try:
-                ckpt = torch.load(pretrained_weights_path, map_location="cpu")
-                sd = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
-                sd_clean = _strip_prefix(sd)
-                try:
-                    encoder.load_state_dict(sd_clean, strict=False)
-                    print(f"[DINO] loaded pretrained weights from {pretrained_weights_path} into encoder")
-                except Exception as e:
-                    print(f"[DINO] warning: failed to strictly load pretrained backbone weights into encoder: {e}")
-            except Exception as e:
-                print(f"[DINO] warning: failed to read pretrained_weights_path {pretrained_weights_path}: {e}")
-
-        return encoder, int(embed_dim_out)
     except Exception as e:
         # If torch.hub or network access is not available on the cluster/node,
         # fallback to a timm-created ViT with ImageNet-pretrained weights when possible.
@@ -1182,6 +1131,58 @@ def _create_vit_tiny(pretrained_weights_path: Optional[str] = None) -> Tuple[nn.
                 print(f"[DINO] warning: failed to read pretrained_weights_path {pretrained_weights_path}: {e}")
 
         return encoder, embed_dim
+
+
+def _create_vit_by_embed_dim(embed_dim: int, pretrained_weights_path: Optional[str] = None) -> Tuple[nn.Module, int]:
+    """Create a ViT backbone matching the specified embedding dimension.
+
+    This attempts to create a model whose patch/embed dims align with a
+    provided checkpoint to avoid size-mismatch errors when loading state_dicts.
+    """
+    try:
+        import timm
+    except ImportError as exc:
+        raise ImportError("timm is required for ViT backbone creation") from exc
+
+    # Map common embed dims to timm model names or dinov2 hub names.
+    if embed_dim == 192:
+        model_name = "vit_tiny_patch16_224"
+    elif embed_dim == 384:
+        model_name = "vit_small_patch16_224"
+    elif embed_dim == 768:
+        # Prefer DINOv2 ViT-B/14 if available via hub
+        dinov2_model = os.environ.get("DINOV2_MODEL", "dinov2_vitb14")
+        try:
+            import torch
+
+            encoder = torch.hub.load("facebookresearch/dinov2", dinov2_model)
+            ed = getattr(encoder, "embed_dim", None) or getattr(encoder, "num_features", None)
+            if ed is None:
+                ed = 768
+            return encoder, int(ed)
+        except Exception:
+            model_name = "vit_base_patch16_224"
+    else:
+        # Fallback: choose base size
+        model_name = "vit_base_patch16_224"
+
+    encoder = timm.create_model(model_name, pretrained=True, num_classes=0, dynamic_img_size=True)
+    embed_dim_out = getattr(encoder, "embed_dim", getattr(encoder, "num_features", None) or embed_dim)
+    # Optionally attempt to load local pretrained weights
+    if pretrained_weights_path and os.path.exists(pretrained_weights_path):
+        try:
+            ckpt = torch.load(pretrained_weights_path, map_location="cpu")
+            sd = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
+            sd_clean = _strip_prefix(sd)
+            try:
+                encoder.load_state_dict(sd_clean, strict=False)
+                print(f"[DINO] loaded pretrained weights from {pretrained_weights_path} into encoder")
+            except Exception as e:
+                print(f"[DINO] warning: failed to strictly load pretrained backbone weights into encoder: {e}")
+        except Exception as e:
+            print(f"[DINO] warning: failed to read pretrained_weights_path {pretrained_weights_path}: {e}")
+
+    return encoder, int(embed_dim_out)
 
 
 def _extract_cls_token(encoder: nn.Module, x: torch.Tensor) -> torch.Tensor:
