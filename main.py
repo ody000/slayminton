@@ -101,6 +101,16 @@ def main():
         help="Path to input MP4 video for track-video mode",
     )
     parser.add_argument(
+        "--pretrained-backbone-path",
+        default=None,
+        help="Path to a local pretrained dinov2 backbone file (e.g. models/pretrained/dinov2_vitb14.pt)",
+    )
+    parser.add_argument(
+        "--court-points-file",
+        default=None,
+        help="Path to JSON file containing 6 court corner points (list of [x,y]) to skip GUI",
+    )
+    parser.add_argument(
         "--frame-limit",
         type=int,
         default=120,
@@ -177,7 +187,11 @@ def _run_track_frames(args, device):
     os.makedirs(run_output_dir, exist_ok=True)
     print(f"[MAIN] run_output_dir={run_output_dir}")
 
-    tracker = DINOTracker(weights_path=args.weights if os.path.exists(args.weights) else None, device=device)
+    tracker = DINOTracker(
+        weights_path=args.weights if os.path.exists(args.weights) else None,
+        pretrained_backbone_path=args.pretrained_backbone_path,
+        device=device,
+    )
     rally_tracker = GameState(
         inactive_timeout_s=args.rally_timeout_s,
         min_displacement_px=args.min_shuttle_motion_px,
@@ -292,7 +306,15 @@ def _run_track_video(args, device):
             print(f"[MAIN] warning: frame/mask count mismatch ({len(frame_paths)} vs {len(mask_paths)})")
 
         runtime_court_corners = None
-        if frame_paths:
+        # If user provided a court points JSON file, load it and skip GUI (suitable for headless runs)
+        if args.court_points_file and os.path.exists(args.court_points_file):
+            try:
+                print(f"[MAIN] loading court points from {args.court_points_file}")
+                with open(args.court_points_file, "r", encoding="utf-8") as cf:
+                    runtime_court_corners = json.load(cf)
+            except Exception as e:
+                print(f"[MAIN] warning: failed to load court points file ({e}), falling back to GUI")
+        elif frame_paths:
             try:
                 print("[MAIN] opening court calibration GUI")
                 from scripts.visualizations import set_court_points
@@ -302,7 +324,11 @@ def _run_track_video(args, device):
                 print(f"[MAIN] warning: court calibration GUI failed ({e})")
         
         # Initialize tracker, game state, and analysis
-        tracker = DINOTracker(weights_path=args.weights if os.path.exists(args.weights) else None, device=device)
+        tracker = DINOTracker(
+            weights_path=args.weights if os.path.exists(args.weights) else None,
+            pretrained_backbone_path=args.pretrained_backbone_path,
+            device=device,
+        )
         rally_tracker = GameState(
             inactive_timeout_s=args.rally_timeout_s,
             min_displacement_px=args.min_shuttle_motion_px,
