@@ -6,6 +6,7 @@
 #SBATCH --output=slay_track-%j.out
 #SBATCH --error=slay_track-%j.err
 #SBATCH --time=03:00:00
+#SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
