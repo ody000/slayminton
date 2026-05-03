@@ -243,8 +243,9 @@ def _run_track_frames(args, device):
 
         # Player detection via DINO, shuttle via TrackNet (temporal stack)
         player_det = dino_tracker.detect(frame, timestamp=timestamp)
+        fh, fw = frame.shape[0], frame.shape[1]
         shuttle_det = tracker.detect(shuttle_input, timestamp=timestamp)
-        rally_active = rally_tracker.update(timestamp=timestamp, shuttle_det=shuttle_det.get("shuttle"))
+        rally_active = rally_tracker.update(timestamp=timestamp, shuttle_det=shuttle_det.get("shuttle"), frame_size=(fh, fw))
         results.append(
             {
                 "frame_path": frame_path,
@@ -400,8 +401,8 @@ def _run_track_video(args, device):
 
             # Shuttle detection via TrackNet on 3-frame RGB stack
             shuttle_det = tracker.detect(shuttle_input, timestamp=timestamp)
-
-            rally_active = rally_tracker.update(timestamp=timestamp, shuttle_det=shuttle_det.get("shuttle"))
+            fh, fw = frame.shape[0], frame.shape[1]
+            rally_active = rally_tracker.update(timestamp=timestamp, shuttle_det=shuttle_det.get("shuttle"), frame_size=(fh, fw))
             results.append(
                 {
                     "frame_path": frame_path,

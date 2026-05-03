@@ -18,7 +18,7 @@ GameState include:
 - hit_count: int - number of hits in the current rally
 """
 class GameState:
-    def __init__(self, inactive_timeout_s: float = 0.8, min_displacement_px: float = 3.0):
+    def __init__(self, inactive_timeout_s: float = 1.0, min_displacement_px: float = 6.0):
         # motion-based rally rule config.
         self.inactive_timeout_s = float(inactive_timeout_s)
         self.min_displacement_px = float(min_displacement_px)
@@ -42,7 +42,17 @@ class GameState:
 
         # Motion-debounce to avoid single-frame jitter extending rallies.
         self.motion_streak: int = 0
-        self.motion_required_streak: int = 2  # require this many frames of motion to accept it
+        self.motion_required_streak: int = 3  # require this many frames of motion to accept it
+
+        # Stability detector: if shuttle center is exactly unchanged for this
+        # many frames, treat as background / inactive and end rally.
+        self.stable_frames: int = 0
+        self.stable_frame_threshold: int = 5
+
+        # Large displacement filter: if displacement between two frames exceeds
+        # this fraction of the frame size (height or width), consider the
+        # detection invalid for tracking (ignored). Expressed as 1/6 of frame.
+        self.max_displacement_fraction: float = 1.0 / 6.0
 
     def start_rally(self):
         self.rally_active = True
@@ -156,12 +166,52 @@ class GameState:
             return True
         return False
 
-    def update(self, timestamp: float, shuttle_det: Optional[ShuttleTuple]) -> bool:
-        """Update state from one frame and return current rally_active."""
+    def update(self, timestamp: float, shuttle_det: Optional[ShuttleTuple], frame_size: Optional[Tuple[int, int]] = None) -> bool:
+        """Update state from one frame and return current rally_active.
+
+        frame_size: optional (height, width) tuple used to apply large-displacement
+        filtering (ignore detections that move impossibly far between frames).
+        """
         center = self._center_from_shuttle(shuttle_det)
 
-        if center is not None:
-            # Update position history for trajectory tracking.
+        # If no detection, clear transient stability counter and return later.
+        if center is None:
+            self.stable_frames = 0
+        else:
+            # If we have a previous center, consider large-displacement filter first.
+            if self.last_center is not None:
+                dx = center[0] - self.last_center[0]
+                dy = center[1] - self.last_center[1]
+                displacement = math.hypot(dx, dy)
+
+                if frame_size is not None:
+                    fh, fw = frame_size
+                    max_allowed = max(fh, fw) * self.max_displacement_fraction
+                    if displacement > max_allowed:
+                        # Ignore this candidate as implausible for tracking: do not
+                        # update history or motion streak. Let caller/tracker treat
+                        # this detection as a candidate to dismiss.
+                        self.motion_streak = 0
+                        return self.rally_active
+
+                # Stability: if center did not move at all for several frames,
+                # treat as background and end the rally.
+                if displacement < 1e-3:
+                    self.stable_frames += 1
+                    if self.stable_frames > self.stable_frame_threshold:
+                        if self.rally_active:
+                            self._record_rally_segment(timestamp)
+                            self.end_rally()
+                        # reset tracking buffers
+                        self.last_center = None
+                        self.last_motion_timestamp = None
+                        self.position_history.clear()
+                        self.motion_streak = 0
+                        return self.rally_active
+                else:
+                    self.stable_frames = 0
+
+            # Accept detection for tracking: append to history and proceed.
             self.position_history.append((timestamp, center[0], center[1]))
             if len(self.position_history) > self.history_max_len:
                 self.position_history.pop(0)
@@ -219,7 +269,19 @@ class GameState:
         Otherwise this falls back to simple visibility-based rally state updates.
         """
         if shuttle_det is not None:
-            return self.update(timestamp=timestamp, shuttle_det=shuttle_det)
+            # For compatibility, if player supplies raw frame_size via kwargs,
+            # accept it. Otherwise call update without frame size.
+            fs = None
+            # allow caller to pass (frame_h, frame_w) as attribute on shuttle_det tuple extras
+            if isinstance(shuttle_det, tuple) and len(shuttle_det) >= 6:
+                # last two elements may be frame_h, frame_w
+                try:
+                    fh = int(shuttle_det[5])
+                    fw = int(shuttle_det[6])
+                    fs = (fh, fw)
+                except Exception:
+                    fs = None
+            return self.update(timestamp=timestamp, shuttle_det=shuttle_det, frame_size=fs)
 
         if player_detected and shuttle_detected:
             if not self.rally_active:
