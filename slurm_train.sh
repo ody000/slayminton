@@ -209,7 +209,7 @@ if [[ "${MODE}" == "train-dino" ]]; then
 	# Compose the runner: use torchrun when USE_DDP=1, otherwise run via uv/python
 	if [[ "${USE_DDP}" == "1" ]]; then
 		echo "[SLURM] USE_DDP=1 -> launching with torchrun (nproc_per_node=${NPROC_PER_NODE})"
-		# Prefer torchrun from the activated venv, fall back to python -m torch.distributed.run, then system torchrun
+		# Prefer torchrun from the activated venv, fall back to venv python -m torch.distributed.run, then system torchrun
 		if [[ -n "${VENV_TORCHRUN:-}" && -x "${VENV_TORCHRUN}" ]]; then
 			RUNNER_CMD=("${VENV_TORCHRUN}" --nproc_per_node ${NPROC_PER_NODE} --standalone)
 		elif [[ -n "${VENV_PY:-}" && -x "${VENV_PY}" ]]; then
