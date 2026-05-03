@@ -51,7 +51,7 @@ EMA_MOMENTUM_END = 0.9995
 BOX_LOSS_WEIGHT = 0.05
 SSL_LOSS_WEIGHT = 20.0
 MIN_CONFIDENCE = 0.25
-VAL_EVERY = 5
+VAL_EVERY = 2
 VAL_IOU_THRESHOLD = 0.5  # Reduced from 0.75 for easier shuttle detection metrics
 
 TRACKED_CLASSES = ("player", "shuttle")
@@ -598,8 +598,6 @@ def train_dino(
     num_workers: int = 0,
     debug_batches: int = 0,
     log_every: int = 10,
-    use_ddp: bool = False,
-    local_rank: int = 0,
     # LoRA targeting options
     use_lora_modules: Optional[List[str]] = None,
     lora_min_dim: int = 64,
@@ -631,11 +629,7 @@ def train_dino(
     - Cosine LR scheduling and EMA momentum scheduling
     """
     os.makedirs(output_dir, exist_ok=True)
-    # select device; when using DDP each process should use its assigned local_rank GPU
-    if use_ddp:
-        device = torch.device(f"cuda:{local_rank}")
-    else:
-        device = torch.device(device)
+    device = torch.device(device)
     print(
         f"[TRAIN] start epochs={epochs} batch_size={batch_size} "
         f"lr={learning_rate} output_dir={output_dir}"
@@ -664,76 +658,35 @@ def train_dino(
     for p in teacher_model.parameters():
         p.requires_grad = False
 
-    # Optionally enable DistributedDataParallel wrapping. Expects torchrun/torch.distributed env.
-    if use_ddp:
-        try:
-            import torch.distributed as dist
-            from torch.nn.parallel import DistributedDataParallel as DDP
-        except Exception:
-            raise RuntimeError("DDP requested but torch.distributed not available")
-        if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend="nccl", init_method="env://")
-        student_model = DDP(student_model, device_ids=[local_rank])
-        teacher_model = DDP(teacher_model, device_ids=[local_rank])
+    # DDP is disabled in this deployment; models remain single-process
 
     train_subset, val_subset = _split_dataset(dataset, train_ratio=0.8, seed=42)
     print(
         f"[TRAIN] dataset_split train={len(train_subset)} val={len(val_subset)} "
         f"eval_every={VAL_EVERY}"
     )
-    print(f"[TRAIN] creating DataLoaders num_workers={num_workers} batch_size={batch_size} use_ddp={use_ddp}")
-    # Helper for DDP unwrapping
-    def _unwrap(m):
-        return m.module if hasattr(m, "module") else m
-
-    if use_ddp:
-        import torch.distributed as dist
-        from torch.utils.data import DistributedSampler
-
-        world_size = dist.get_world_size()
-        rank = dist.get_rank()
-
-        train_sampler = DistributedSampler(train_subset, num_replicas=world_size, rank=rank, shuffle=True)
-        val_sampler = DistributedSampler(val_subset, num_replicas=world_size, rank=rank, shuffle=False)
-
-        train_loader = DataLoader(
-            train_subset,
-            batch_size=batch_size,
-            sampler=train_sampler,
-            num_workers=num_workers,
-            collate_fn=_dino_collate,
-            pin_memory=True,
-        )
-        val_loader = DataLoader(
-            val_subset,
-            batch_size=batch_size,
-            sampler=val_sampler,
-            num_workers=num_workers,
-            collate_fn=_dino_collate,
-            pin_memory=True,
-        )
-    else:
-        train_loader = DataLoader(
-            train_subset,
-            batch_size=batch_size,
-            shuffle=True,
-            num_workers=num_workers,
-            collate_fn=_dino_collate,
-            pin_memory=False,
-        )
-        val_loader = DataLoader(
-            val_subset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            collate_fn=_dino_collate,
-            pin_memory=False,
-        )
+    print(f"[TRAIN] creating DataLoaders num_workers={num_workers} batch_size={batch_size}")
+    train_loader = DataLoader(
+        train_subset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        collate_fn=_dino_collate,
+        pin_memory=False,
+    )
+    val_loader = DataLoader(
+        val_subset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=_dino_collate,
+        pin_memory=False,
+    )
 
     # Optionally freeze backbone for the first few epochs and only train projector+detector.
     if freeze_backbone_epochs and freeze_backbone_epochs > 0:
         # Freeze encoder parameters but preserve LoRA adapter parameters (if present).
-        for name, param in _unwrap(student_model).encoder.named_parameters():
+        for name, param in student_model.encoder.named_parameters():
             # Keep LoRA adapter params trainable by name convention (lora_A / lora_B)
             if ("lora_A" in name) or ("lora_B" in name):
                 param.requires_grad = True
@@ -897,11 +850,11 @@ def train_dino(
         # Unfreeze backbone when we pass the freeze_backbone_epochs threshold.
         if freeze_backbone_epochs and (epoch + 1) == freeze_backbone_epochs:
             print(f"[TRAIN] unfreezing encoder parameters at epoch {epoch + 1}")
-            # Unwrap and unfreeze all encoder params (including adapters); rebuild optimizer grouping
-            for name, param in _unwrap(student_model).encoder.named_parameters():
+            # Unfreeze all encoder params (including adapters); rebuild optimizer grouping
+            for name, param in student_model.encoder.named_parameters():
                 param.requires_grad = True
             # Rebuild optimizer with a smaller LR for the backbone parameters.
-            backbone_params = [p for p in _unwrap(student_model).encoder.parameters() if p.requires_grad]
+            backbone_params = [p for p in student_model.encoder.parameters() if p.requires_grad]
             other_params = [p for p in student_model.parameters() if p.requires_grad and p not in backbone_params]
             param_groups = [
                 {"params": other_params, "lr": learning_rate},
@@ -911,17 +864,8 @@ def train_dino(
 
     # Save student model (teacher is only for training, not needed for inference)
     ckpt_path = os.path.join(output_dir, checkpoint_name)
-    save_ckpt = True
-    if use_ddp:
-        import torch.distributed as dist
-        try:
-            save_ckpt = dist.get_rank() == 0
-        except Exception:
-            save_ckpt = True
-    if save_ckpt:
-        model_for_save = _unwrap(student_model)
-        model_for_save.save_checkpoint(ckpt_path)
-        print(f"[TRAIN] saved_checkpoint student={ckpt_path}")
+    student_model.save_checkpoint(ckpt_path)
+    print(f"[TRAIN] saved_checkpoint student={ckpt_path}")
 
     history_np = {
         "train_loss": np.asarray(history.train_loss, dtype=np.float32),
