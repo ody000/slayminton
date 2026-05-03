@@ -755,8 +755,13 @@ def train_dino(
             det_images = _ensure_multiple(det_images, patch_H)
 
             # LR scheduling: optional linear warmup (by epoch count) then cosine decay to end_lr
-            warmup_steps = max(1, lr_warmup_epochs * max(len(train_loader), 1))
-            if step_count < warmup_steps and lr_warmup_epochs > 0:
+            # Compute warmup steps explicitly to avoid ambiguity when lr_warmup_epochs == 0
+            if lr_warmup_epochs and lr_warmup_epochs > 0:
+                warmup_steps = lr_warmup_epochs * len(train_loader)
+            else:
+                warmup_steps = 0
+
+            if warmup_steps > 0 and step_count < warmup_steps:
                 lr_step = float(learning_rate) * float(step_count) / float(max(1, warmup_steps))
             else:
                 # cosine schedule after warmup; adjust step index and total for decay portion
@@ -869,11 +874,28 @@ def train_dino(
             backbone_params = [p for p in student_model.encoder.parameters() if p.requires_grad]
             backbone_param_ids = {id(p) for p in backbone_params}
             other_params = [p for p in student_model.parameters() if p.requires_grad and id(p) not in backbone_param_ids]
-            param_groups = [
-                {"params": other_params, "lr": learning_rate},
-                {"params": backbone_params, "lr": learning_rate * backbone_lr_factor},
-            ]
-            optimizer = torch.optim.AdamW(param_groups, weight_decay=WEIGHT_DECAY)
+
+            # Build param groups only if non-empty to avoid empty-group optimizer errors
+            param_groups = []
+            if other_params:
+                param_groups.append({"params": other_params, "lr": learning_rate})
+            if backbone_params:
+                param_groups.append({"params": backbone_params, "lr": learning_rate * backbone_lr_factor})
+
+            if param_groups:
+                optimizer = torch.optim.AdamW(param_groups, weight_decay=WEIGHT_DECAY)
+                try:
+                    lrs = [pg.get("lr") for pg in optimizer.param_groups]
+                except Exception:
+                    lrs = []
+                print(f"[TRAIN] rebuilt optimizer: groups={len(param_groups)} other={len(other_params)} backbone={len(backbone_params)} lrs={lrs}")
+            else:
+                # Fallback: collect all trainable params
+                params_to_optimize = [p for p in student_model.parameters() if p.requires_grad]
+                if not params_to_optimize:
+                    raise RuntimeError("No parameters to optimize after unfreezing encoder")
+                optimizer = torch.optim.AdamW(params_to_optimize, lr=learning_rate, weight_decay=WEIGHT_DECAY)
+                print(f"[TRAIN] rebuilt optimizer fallback: single-group params={len(params_to_optimize)} lr={learning_rate}")
 
     # Save student model (teacher is only for training, not needed for inference)
     ckpt_path = os.path.join(output_dir, checkpoint_name)
