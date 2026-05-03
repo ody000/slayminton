@@ -118,9 +118,6 @@ DINOV2_MODEL="${DINOV2_MODEL:-dinov2_vitb14}"
 USE_LORA="${USE_LORA:-0}"
 LORA_R="${LORA_R:-4}"
 LORA_ALPHA="${LORA_ALPHA:-16}"
-USE_DDP="${USE_DDP:-0}"
-# How many processes per node to pass to torchrun when USE_DDP=1
-NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
 # AMP toggle (no-op unless main.py/train_dino support enabled)
 USE_AMP="${USE_AMP:-0}"
 # Default number of dataloader workers for training
@@ -206,33 +203,21 @@ if [[ "${MODE}" == "train-dino" ]]; then
 		UV_CMD_LORA=" --lora-r ${LORA_R} --lora-alpha ${LORA_ALPHA}"
 	fi
 
-	# Compose the runner: use torchrun when USE_DDP=1, otherwise run via uv/python
-	if [[ "${USE_DDP}" == "1" ]]; then
-		echo "[SLURM] USE_DDP=1 -> launching with torchrun (nproc_per_node=${NPROC_PER_NODE})"
-		# Prefer torchrun from the activated venv, fall back to venv python -m torch.distributed.run, then system torchrun
-		if [[ -n "${VENV_TORCHRUN:-}" && -x "${VENV_TORCHRUN}" ]]; then
-			RUNNER_CMD=("${VENV_TORCHRUN}" --nproc_per_node ${NPROC_PER_NODE} --standalone)
-		elif [[ -n "${VENV_PY:-}" && -x "${VENV_PY}" ]]; then
-			RUNNER_CMD=("${VENV_PY}" -m torch.distributed.run --nproc_per_node ${NPROC_PER_NODE} --standalone)
-		else
-			RUNNER_CMD=(torchrun --nproc_per_node ${NPROC_PER_NODE} --standalone)
-		fi
-		# torchrun will set LOCAL_RANK per process; pass --use-ddp to main
-		EXTRA_DDP_FLAG=" --use-ddp"
-	else
-		RUNNER_CMD=(uv run -v python -u)
-		EXTRA_DDP_FLAG=""
+	# Build extra AMP flag if requested
+	EXTRA_AMP_FLAG=""
+	if [[ "${USE_AMP}" == "1" ]]; then
+		EXTRA_AMP_FLAG=" --use-amp"
 	fi
 
-	# Final training command
-	"${RUNNER_CMD[@]}" main.py \
+	# Final training command (single-process runner)
+	uv run -v python -u main.py \
 		--mode train \
 		--train-dir "${TRAIN_DIR}" \
 		--output-dir "${TRAIN_OUTPUT_DIR}" \
 		--weights "${WEIGHTS_PATH}" \
 		--epochs "${EPOCHS}" \
 		--batch-size "${BATCH_SIZE}" \
-		--learning-rate "${LR}" ${UV_CMD_LORA} ${EXTRA_DDP_FLAG}
+		--learning-rate "${LR}" ${UV_CMD_LORA} ${EXTRA_AMP_FLAG}
 
 	echo "[SLURM] train-dino complete"
 	echo "[SLURM] Artifacts are in: ${RUN_ROOT}"
