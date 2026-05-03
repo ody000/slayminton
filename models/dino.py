@@ -598,6 +598,12 @@ def train_dino(
     num_workers: int = 0,
     debug_batches: int = 0,
     log_every: int = 10,
+    use_ddp: bool = False,
+    local_rank: int = 0,
+    # LoRA targeting options
+    use_lora_modules: Optional[List[str]] = None,
+    lora_min_dim: int = 64,
+    use_amp: bool = False,
 ):
     """Train DINO student/teacher with detector head using 80/20 train/val split.
 
@@ -625,7 +631,11 @@ def train_dino(
     - Cosine LR scheduling and EMA momentum scheduling
     """
     os.makedirs(output_dir, exist_ok=True)
-    device = torch.device(device)
+    # select device; when using DDP each process should use its assigned local_rank GPU
+    if use_ddp:
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        device = torch.device(device)
     print(
         f"[TRAIN] start epochs={epochs} batch_size={batch_size} "
         f"lr={learning_rate} output_dir={output_dir}"
@@ -639,7 +649,13 @@ def train_dino(
         student_model = DINOTracker(device=device, pretrained_backbone_path=pretrained_backbone_path)
     # Optionally apply LoRA adapters to encoder for lightweight fine-tuning.
     if use_lora:
-        n_replaced = apply_lora_to_encoder(student_model.encoder, r=lora_r, alpha=lora_alpha)
+        n_replaced = apply_lora_to_encoder(
+            student_model.encoder,
+            r=lora_r,
+            alpha=lora_alpha,
+            min_dim=lora_min_dim,
+            module_name_patterns=use_lora_modules,
+        )
         print(f"[TRAIN] LoRA applied to encoder: replaced {n_replaced} Linear modules (r={lora_r}, alpha={lora_alpha})")
     teacher_model = teacher if isinstance(teacher, DINOTracker) else copy.deepcopy(student_model)
     student_model.to(device)
@@ -648,33 +664,76 @@ def train_dino(
     for p in teacher_model.parameters():
         p.requires_grad = False
 
+    # Optionally enable DistributedDataParallel wrapping. Expects torchrun/torch.distributed env.
+    if use_ddp:
+        try:
+            import torch.distributed as dist
+            from torch.nn.parallel import DistributedDataParallel as DDP
+        except Exception:
+            raise RuntimeError("DDP requested but torch.distributed not available")
+        if not torch.distributed.is_initialized():
+            torch.distributed.init_process_group(backend="nccl", init_method="env://")
+        student_model = DDP(student_model, device_ids=[local_rank])
+        teacher_model = DDP(teacher_model, device_ids=[local_rank])
+
     train_subset, val_subset = _split_dataset(dataset, train_ratio=0.8, seed=42)
     print(
         f"[TRAIN] dataset_split train={len(train_subset)} val={len(val_subset)} "
         f"eval_every={VAL_EVERY}"
     )
-    print(f"[TRAIN] creating DataLoaders num_workers={num_workers} batch_size={batch_size}")
-    train_loader = DataLoader(
-        train_subset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        collate_fn=_dino_collate,
-        pin_memory=False,
-    )
-    val_loader = DataLoader(
-        val_subset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        collate_fn=_dino_collate,
-        pin_memory=False,
-    )
+    print(f"[TRAIN] creating DataLoaders num_workers={num_workers} batch_size={batch_size} use_ddp={use_ddp}")
+    # Helper for DDP unwrapping
+    def _unwrap(m):
+        return m.module if hasattr(m, "module") else m
+
+    if use_ddp:
+        import torch.distributed as dist
+        from torch.utils.data import DistributedSampler
+
+        world_size = dist.get_world_size()
+        rank = dist.get_rank()
+
+        train_sampler = DistributedSampler(train_subset, num_replicas=world_size, rank=rank, shuffle=True)
+        val_sampler = DistributedSampler(val_subset, num_replicas=world_size, rank=rank, shuffle=False)
+
+        train_loader = DataLoader(
+            train_subset,
+            batch_size=batch_size,
+            sampler=train_sampler,
+            num_workers=num_workers,
+            collate_fn=_dino_collate,
+            pin_memory=True,
+        )
+        val_loader = DataLoader(
+            val_subset,
+            batch_size=batch_size,
+            sampler=val_sampler,
+            num_workers=num_workers,
+            collate_fn=_dino_collate,
+            pin_memory=True,
+        )
+    else:
+        train_loader = DataLoader(
+            train_subset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            collate_fn=_dino_collate,
+            pin_memory=False,
+        )
+        val_loader = DataLoader(
+            val_subset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            collate_fn=_dino_collate,
+            pin_memory=False,
+        )
 
     # Optionally freeze backbone for the first few epochs and only train projector+detector.
     if freeze_backbone_epochs and freeze_backbone_epochs > 0:
         # Freeze encoder parameters but preserve LoRA adapter parameters (if present).
-        for name, param in student_model.encoder.named_parameters():
+        for name, param in _unwrap(student_model).encoder.named_parameters():
             # Keep LoRA adapter params trainable by name convention (lora_A / lora_B)
             if ("lora_A" in name) or ("lora_B" in name):
                 param.requires_grad = True
@@ -688,6 +747,9 @@ def train_dino(
     history = TrainHistory(train_loss=[], val_loss=[], val_iou=[], val_map75=[], eval_epochs=[])
     # DINO centering buffer stabilizes teacher targets.
     center = torch.zeros(DINO_OUT_DIM, device=device)
+
+    # AMP scaler if requested
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     step_count = 0
     for epoch in range(epochs):
@@ -742,12 +804,13 @@ def train_dino(
             with torch.no_grad():
                 # Teacher only processes global crops.
                 teacher_views = [teacher_model.forward_dino(views[i]) for i in range(NUM_GLOBAL_CROPS)]
-                teacher_probs = [
-                    F.softmax((tv - center) / teacher_temp, dim=-1).detach() for tv in teacher_views
-                ]
+                teacher_probs = [F.softmax((tv - center) / teacher_temp, dim=-1).detach() for tv in teacher_views]
 
             # Student sees global + local views.
-            student_outs = [student_model.forward_dino(v) for v in views]
+            # Use AMP autocast for student forward if enabled
+            autocast = torch.cuda.amp.autocast if use_amp else torch.cpu.amp.autocast
+            with autocast(enabled=use_amp):
+                student_outs = [student_model.forward_dino(v) for v in views]
 
             # Cross-view DINO objective, skipping exact same-view pairs.
             ssl_loss = 0.0
@@ -778,8 +841,13 @@ def train_dino(
             loss = SSL_LOSS_WEIGHT * ssl_loss + det_loss
 
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            if use_amp:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
 
             with torch.no_grad():
                 # Update center: compute from all student outputs for stability.
@@ -829,11 +897,11 @@ def train_dino(
         # Unfreeze backbone when we pass the freeze_backbone_epochs threshold.
         if freeze_backbone_epochs and (epoch + 1) == freeze_backbone_epochs:
             print(f"[TRAIN] unfreezing encoder parameters at epoch {epoch + 1}")
-            # Unfreeze all encoder params (including adapters); rebuild optimizer grouping
-            for name, param in student_model.encoder.named_parameters():
+            # Unwrap and unfreeze all encoder params (including adapters); rebuild optimizer grouping
+            for name, param in _unwrap(student_model).encoder.named_parameters():
                 param.requires_grad = True
             # Rebuild optimizer with a smaller LR for the backbone parameters.
-            backbone_params = [p for p in student_model.encoder.parameters() if p.requires_grad]
+            backbone_params = [p for p in _unwrap(student_model).encoder.parameters() if p.requires_grad]
             other_params = [p for p in student_model.parameters() if p.requires_grad and p not in backbone_params]
             param_groups = [
                 {"params": other_params, "lr": learning_rate},
@@ -843,8 +911,17 @@ def train_dino(
 
     # Save student model (teacher is only for training, not needed for inference)
     ckpt_path = os.path.join(output_dir, checkpoint_name)
-    student_model.save_checkpoint(ckpt_path)
-    print(f"[TRAIN] saved_checkpoint student={ckpt_path}")
+    save_ckpt = True
+    if use_ddp:
+        import torch.distributed as dist
+        try:
+            save_ckpt = dist.get_rank() == 0
+        except Exception:
+            save_ckpt = True
+    if save_ckpt:
+        model_for_save = _unwrap(student_model)
+        model_for_save.save_checkpoint(ckpt_path)
+        print(f"[TRAIN] saved_checkpoint student={ckpt_path}")
 
     history_np = {
         "train_loss": np.asarray(history.train_loss, dtype=np.float32),
@@ -1302,26 +1379,44 @@ class LoRALinear(nn.Module):
         return orig_out + lora_out
 
 
-def apply_lora_to_encoder(encoder: nn.Module, r: int = 4, alpha: int = 16, min_dim: int = 64) -> int:
+def apply_lora_to_encoder(
+    encoder: nn.Module,
+    r: int = 4,
+    alpha: int = 16,
+    min_dim: int = 64,
+    module_name_patterns: Optional[List[str]] = None,
+) -> int:
     """Replace suitable nn.Linear modules inside `encoder` with LoRA-wrapped versions.
 
-    Heuristic: replace Linear layers whose in/out feature sizes are >= `min_dim`.
+    Heuristics:
+    - If `module_name_patterns` is provided, only apply LoRA to modules whose
+      full module name contains any of the given substrings.
+    - Otherwise apply to Linear layers whose in/out feature sizes are >= `min_dim`.
+
     Returns number of modules replaced.
     """
     replaced = 0
     # Collect linear module names first to avoid mutation while iterating
-    linear_names = [name for name, m in encoder.named_modules() if isinstance(m, nn.Linear)]
-    for full_name in linear_names:
+    linear_items = [(name, m) for name, m in encoder.named_modules() if isinstance(m, nn.Linear)]
+    for full_name, mod in linear_items:
         parent, attr = _get_parent_module_by_name(encoder, full_name)
         if parent is None:
             continue
         orig = getattr(parent, attr)
-        # Skip small matrices and adapters already applied
-        if getattr(orig, "in_features", 0) < min_dim or getattr(orig, "out_features", 0) < min_dim:
-            continue
         # Avoid double-wrapping
         if isinstance(orig, LoRALinear):
             continue
+
+        # If patterns provided, only match those names
+        if module_name_patterns:
+            matched = any(pat in full_name for pat in module_name_patterns)
+            if not matched:
+                continue
+        else:
+            # Skip small matrices
+            if getattr(orig, "in_features", 0) < min_dim or getattr(orig, "out_features", 0) < min_dim:
+                continue
+
         # Replace module
         setattr(parent, attr, LoRALinear(orig, r=r, alpha=alpha))
         replaced += 1

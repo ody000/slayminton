@@ -107,9 +107,9 @@ mkdir -p "${RUN_ROOT}" "${TRAIN_OUTPUT_DIR}" "${CHECKPOINT_DIR}" "${MAIN_OUTPUT_
 # Override with --export=ALL,VAR=value at sbatch time.
 
 # Train mode knobs
-EPOCHS="${EPOCHS:-75}"
-BATCH_SIZE="${BATCH_SIZE:-32}"
-LR="${LR:-5e-4}"  # faster convergence on training plateau
+EPOCHS="${EPOCHS:-12}"
+BATCH_SIZE="${BATCH_SIZE:-16}"
+LR="${LR:-3e-4}"  # default LR for fine-tuning
 WEIGHTS_NAME="${WEIGHTS_NAME:-dino_tracker.pt}"
 WEIGHTS_PATH="${CHECKPOINT_DIR}/${WEIGHTS_NAME}"
 # Which pretrained backbone to use (env override). Default uses DINOv2 base ViT/14.
@@ -118,6 +118,13 @@ DINOV2_MODEL="${DINOV2_MODEL:-dinov2_vitb14}"
 USE_LORA="${USE_LORA:-0}"
 LORA_R="${LORA_R:-4}"
 LORA_ALPHA="${LORA_ALPHA:-16}"
+USE_DDP="${USE_DDP:-0}"
+# How many processes per node to pass to torchrun when USE_DDP=1
+NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
+# AMP toggle (no-op unless main.py/train_dino support enabled)
+USE_AMP="${USE_AMP:-0}"
+# Default number of dataloader workers for training
+NUM_WORKERS="${NUM_WORKERS:-4}"
 
 # Run-main knobs
 FPS="${FPS:-30.0}"
@@ -188,14 +195,26 @@ if [[ "${MODE}" == "train-dino" ]]; then
 		UV_CMD_LORA=" --lora-r ${LORA_R} --lora-alpha ${LORA_ALPHA}"
 	fi
 
-	uv run -v python -u main.py \
+	# Compose the runner: use torchrun when USE_DDP=1, otherwise run via uv/python
+	if [[ "${USE_DDP}" == "1" ]]; then
+		echo "[SLURM] USE_DDP=1 -> launching with torchrun (nproc_per_node=${NPROC_PER_NODE})"
+		RUNNER_CMD=(torchrun --nproc_per_node ${NPROC_PER_NODE} --standalone)
+		# torchrun will set LOCAL_RANK per process; pass --use-ddp to main
+		EXTRA_DDP_FLAG=" --use-ddp"
+	else
+		RUNNER_CMD=(uv run -v python -u)
+		EXTRA_DDP_FLAG=""
+	fi
+
+	# Final training command
+	"${RUNNER_CMD[@]}" main.py \
 		--mode train \
 		--train-dir "${TRAIN_DIR}" \
 		--output-dir "${TRAIN_OUTPUT_DIR}" \
 		--weights "${WEIGHTS_PATH}" \
 		--epochs "${EPOCHS}" \
 		--batch-size "${BATCH_SIZE}" \
-		--learning-rate "${LR}" ${UV_CMD_LORA}
+		--learning-rate "${LR}" ${UV_CMD_LORA} ${EXTRA_DDP_FLAG}
 
 	echo "[SLURM] train-dino complete"
 	echo "[SLURM] Artifacts are in: ${RUN_ROOT}"

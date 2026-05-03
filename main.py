@@ -62,6 +62,30 @@ def main():
         help="LoRA alpha scaling",
     )
     parser.add_argument(
+        "--lora-modules",
+        type=str,
+        default=os.environ.get("LORA_MODULES", ""),
+        help="Comma-separated module name substrings to apply LoRA to (e.g. 'attn,qkv')",
+    )
+    parser.add_argument(
+        "--lora-min-dim",
+        type=int,
+        default=int(os.environ.get("LORA_MIN_DIM", "64")),
+        help="Minimum Linear dim to consider for LoRA if no module list provided",
+    )
+    parser.add_argument(
+        "--use-ddp",
+        action="store_true",
+        default=(os.environ.get("USE_DDP", "0") == "1"),
+        help="Enable DistributedDataParallel when launched via torchrun",
+    )
+    parser.add_argument(
+        "--use-amp",
+        action="store_true",
+        default=(os.environ.get("USE_AMP", "0") == "1"),
+        help="Enable AMP (automatic mixed precision) during training",
+    )
+    parser.add_argument(
         "--frames-dir",
         default="data/input/train",
         help="Directory containing RGB image frames for dry-run tracking mode",
@@ -114,6 +138,11 @@ def main():
             use_lora=args.use_lora,
             lora_r=args.lora_r,
             lora_alpha=args.lora_alpha,
+            use_lora_modules=[s for s in args.lora_modules.split(",") if s] if args.lora_modules else None,
+            lora_min_dim=args.lora_min_dim,
+            use_ddp=args.use_ddp,
+            local_rank=int(os.environ.get("LOCAL_RANK", "0")),
+            use_amp=args.use_amp,
         )
 
         print("[MAIN] training_complete")
