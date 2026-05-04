@@ -727,12 +727,12 @@ def draw_dino_boxes_with_heatmap(
                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, PLAYER_COLOR, 2, cv2.LINE_AA)
             
             # Draw shuttle bounding box (red) if visualization is enabled for this frame
-            # During rally_active periods, always visualize the shuttle (unless detection was discarded).
-            # Outside rally periods, apply stricter visualization hints (stationarity suppression).
+            # Rule: Always visualize shuttle during rally_active=True
+            # Outside rally periods, apply stationarity suppression to reduce visual noise
             should_visualize = False
             if result.get("rally_active", False):
-                # During rally: visualize unless the detection was explicitly discarded
-                should_visualize = not (result.get("last_detection_discarded", False))
+                # During rally: always visualize the shuttle
+                should_visualize = True
             else:
                 # Outside rally: use per-frame hints (stationarity/discarding)
                 if "should_visualize_shuttle" in result:
