@@ -655,6 +655,8 @@ def draw_dino_boxes_with_heatmap(
     fps: int = 30,
     court_corners: np.ndarray | None = None,
     mask_paths: list[str] | None = None,
+    rally_status: list[bool] | None = None,
+    rally_tracker: object | None = None,
 ) -> None:
     """
     Generate annotated video with DINO bounding boxes and shuttle heatmap.
@@ -665,6 +667,10 @@ def draw_dino_boxes_with_heatmap(
         tracking_results: List of tracking result dicts with player/shuttle detections
         output_video_path: Path to save annotated video
         fps: Frames per second
+        court_corners: Optional court corner points for homography
+        mask_paths: Optional mask frame paths for player detection
+        rally_status: Optional list of bool per frame indicating rally active state
+        rally_tracker: Optional GameState object to check shuttle visualization hints
     """
     if not frame_paths:
         print("[DINO_VIZ] no frames to visualize")
@@ -720,9 +726,14 @@ def draw_dino_boxes_with_heatmap(
                     cv2.putText(frame, "Player", (x, max(y - 6, 12)), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, PLAYER_COLOR, 2, cv2.LINE_AA)
             
-            # Draw shuttle bounding box (red) and accumulate heatmap
+            # Draw shuttle bounding box (red) and accumulate heatmap if visualization is enabled
+            # Check if shuttle should be visualized based on game_state hints or rally_tracker
+            should_visualize = True
+            if rally_tracker is not None:
+                should_visualize = rally_tracker.should_visualize_shuttle()
+            
             shuttle_det = result.get("shuttle")
-            if shuttle_det and isinstance(shuttle_det, (list, tuple)) and len(shuttle_det) >= 5:
+            if should_visualize and shuttle_det and isinstance(shuttle_det, (list, tuple)) and len(shuttle_det) >= 5:
                 _, x, y, h, w = shuttle_det[0], int(shuttle_det[1]), int(shuttle_det[2]), int(shuttle_det[3]), int(shuttle_det[4])
                 cv2.rectangle(frame, (x, y), (x + w, y + h), SHUTTLE_COLOR, 2)
                 cv2.putText(frame, "Shuttle", (x, max(y - 6, 12)), 
@@ -741,6 +752,36 @@ def draw_dino_boxes_with_heatmap(
                     if isinstance(p2_pos, tuple):
                         draw_player_marker(insert, p2_pos, P2_COLOR, "P2")
                 paste_insert_bottom_right(frame, insert, INSERT_ALPHA)
+        
+        # Draw rally status in top-right corner
+        if rally_status is not None and i < len(rally_status):
+            is_rally = rally_status[i]
+            if is_rally:
+                label = "Rally"
+                color = (0, 255, 0)  # Green
+            else:
+                label = "No Rally"
+                color = (0, 0, 255)  # Red
+            
+            # Draw text with background for better visibility
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.7
+            thickness = 2
+            text_size = cv2.getTextSize(label, font, font_scale, thickness)[0]
+            
+            # Position in top-right corner with small margin
+            text_x = W - text_size[0] - 10
+            text_y = 25
+            
+            # Draw semi-transparent background
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (text_x - 5, text_y - text_size[1] - 5),
+                         (W - 5, text_y + 5), (0, 0, 0), -1)
+            cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+            
+            # Draw text
+            cv2.putText(frame, label, (text_x, text_y),
+                       font, font_scale, color, thickness, cv2.LINE_AA)
         
         writer.write(frame)
         

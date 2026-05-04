@@ -54,6 +54,11 @@ class GameState:
         # detection invalid for tracking (ignored). Expressed as 1/6 of frame.
         self.max_displacement_fraction: float = 1.0 / 6.0
 
+        # Visualization hints for current frame
+        self.last_detection_discarded: bool = False  # True if latest detection was rejected by large-displacement filter
+        self.consecutive_stationary_frames: int = 0  # count frames where shuttle doesn't move
+        self.stationary_visualization_threshold: int = 3  # suppress visualization after this many stationary frames
+
     def start_rally(self):
         self.rally_active = True
         self.hit_count = 0
@@ -97,6 +102,19 @@ class GameState:
                 print(f"[GAME] hit t={self.last_motion_timestamp:.3f}s count={self.hit_count}")
             else:
                 print(f"[GAME] hit count={self.hit_count}")
+
+    def should_visualize_shuttle(self) -> bool:
+        """Check if the current frame's shuttle should be visualized.
+        
+        Returns False if:
+        - Last detection was discarded by large-displacement filter
+        - Shuttle has been stationary for > threshold frames
+        """
+        if self.last_detection_discarded:
+            return False
+        if self.consecutive_stationary_frames > self.stationary_visualization_threshold:
+            return False
+        return True
 
     @staticmethod
     def _center_from_shuttle(shuttle_det: Optional[ShuttleTuple]) -> Optional[Tuple[float, float]]:
@@ -173,10 +191,12 @@ class GameState:
         filtering (ignore detections that move impossibly far between frames).
         """
         center = self._center_from_shuttle(shuttle_det)
+        self.last_detection_discarded = False  # reset flag each frame
 
         # If no detection, clear transient stability counter and return later.
         if center is None:
             self.stable_frames = 0
+            self.consecutive_stationary_frames = 0
         else:
             # If we have a previous center, consider large-displacement filter first.
             if self.last_center is not None:
@@ -189,15 +209,17 @@ class GameState:
                     max_allowed = max(fh, fw) * self.max_displacement_fraction
                     if displacement > max_allowed:
                         # Ignore this candidate as implausible for tracking: do not
-                        # update history or motion streak. Let caller/tracker treat
-                        # this detection as a candidate to dismiss.
+                        # update history or motion streak. Mark for visualization suppression.
                         self.motion_streak = 0
+                        self.last_detection_discarded = True
+                        self.consecutive_stationary_frames = 0
                         return self.rally_active
 
                 # Stability: if center did not move at all for several frames,
                 # treat as background and end the rally.
                 if displacement < 1e-3:
                     self.stable_frames += 1
+                    self.consecutive_stationary_frames += 1
                     if self.stable_frames > self.stable_frame_threshold:
                         if self.rally_active:
                             self._record_rally_segment(timestamp)
@@ -207,9 +229,11 @@ class GameState:
                         self.last_motion_timestamp = None
                         self.position_history.clear()
                         self.motion_streak = 0
+                        self.consecutive_stationary_frames = 0
                         return self.rally_active
                 else:
                     self.stable_frames = 0
+                    self.consecutive_stationary_frames = 0  # reset stationary counter on motion
 
             # Accept detection for tracking: append to history and proceed.
             self.position_history.append((timestamp, center[0], center[1]))
@@ -224,6 +248,7 @@ class GameState:
                 if not self.rally_active:
                     self.current_rally_start_timestamp = timestamp
                 self.start_rally()
+                self.consecutive_stationary_frames = 0
             else:
                 # Compare current shuttle center to last known center to determine motion.
                 dx = center[0] - self.last_center[0]
@@ -242,9 +267,11 @@ class GameState:
                         # Check for hit using trajectory prediction-based detector.
                         if self._detect_hit(center, timestamp):
                             self.record_hit()
+                    self.consecutive_stationary_frames = 0  # motion detected, reset counter
                 else:
                     # Reset streak on small movement (likely jitter)
                     self.motion_streak = 0
+                    self.consecutive_stationary_frames += 1  # track stationary frames
 
             self.last_center = center
 
@@ -302,3 +329,89 @@ class GameState:
 
     def get_rally_data(self):
         return list(self.rally_data)
+
+
+def build_rally_status_per_frame(rally_data: list, total_frames: int, fps: float) -> tuple[list[bool], list]:
+    """Build a per-frame rally active status and consolidated rally data.
+    
+    Consolidates rally active/inactive periods shorter than 0.5s by merging them
+    into the surrounding state. This prevents short false positives/negatives from
+    fragmenting the rally detection.
+    
+    Args:
+        rally_data: List of rally segments with start_time, end_time, duration_s
+        total_frames: Total number of frames in the video
+        fps: Frames per second
+    
+    Returns:
+        rally_status: List of bool (True=rally active, False=no rally) per frame
+        consolidated_rally_data: Updated rally data with merged short segments
+    """
+    frame_duration = 1.0 / max(fps, 1e-6)
+    min_period_duration = 0.5  # seconds
+    min_period_frames = max(1, int(min_period_duration / frame_duration))
+    
+    # Initialize rally status as all False
+    rally_status = [False] * total_frames
+    
+    # Mark frames in each rally segment
+    for rally in rally_data:
+        start_frame = max(0, int(rally["start_time"] * fps))
+        end_frame = min(total_frames - 1, int(rally["end_time"] * fps))
+        for i in range(start_frame, end_frame + 1):
+            if i < len(rally_status):
+                rally_status[i] = True
+    
+    # Post-process: merge short rally/non-rally periods
+    consolidated = rally_status.copy()
+    i = 0
+    while i < len(consolidated):
+        current_state = consolidated[i]
+        start_i = i
+        # Count consecutive frames with same state
+        while i < len(consolidated) and consolidated[i] == current_state:
+            i += 1
+        period_len = i - start_i
+        
+        # If period is shorter than threshold, merge with surrounding state
+        if period_len < min_period_frames and start_i > 0:
+            prev_state = consolidated[start_i - 1]
+            for j in range(start_i, i):
+                consolidated[j] = prev_state
+    
+    # Rebuild rally_data from consolidated status
+    consolidated_rally_data = []
+    rally_id = 1
+    in_rally = False
+    rally_start = None
+    
+    for frame_idx, is_rally in enumerate(consolidated):
+        if is_rally and not in_rally:
+            # Start of a new rally
+            rally_start = frame_idx * frame_duration
+            in_rally = True
+        elif not is_rally and in_rally:
+            # End of a rally
+            rally_end = frame_idx * frame_duration
+            duration = max(rally_end - rally_start, 0.0)
+            consolidated_rally_data.append({
+                "rally_id": rally_id,
+                "start_time": float(rally_start),
+                "end_time": float(rally_end),
+                "duration_s": float(duration),
+            })
+            rally_id += 1
+            in_rally = False
+    
+    # Close any open rally at the end
+    if in_rally and rally_start is not None:
+        rally_end = (total_frames - 1) * frame_duration
+        duration = max(rally_end - rally_start, 0.0)
+        consolidated_rally_data.append({
+            "rally_id": rally_id,
+            "start_time": float(rally_start),
+            "end_time": float(rally_end),
+            "duration_s": float(duration),
+        })
+    
+    return consolidated, consolidated_rally_data

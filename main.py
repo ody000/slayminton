@@ -17,27 +17,26 @@ import torch
 from collections import deque
 
 from core.analysis import Analysis
-from core.game_state import GameState
+from core.game_state import GameState, build_rally_status_per_frame
 from models.dino import DINODataset, DINOTracker, train_dino
 from models.tracknet import TrackNetTracker
 from utils.video_io import extract_frames, apply_mog2_to_frames
 
 
-"""
-Main execution method for the Slayminton application.
-1. Define the paths for input video, output video, and CSV data. Handle
-   edge cases, command-line arguments, or configuration files as needed.
-2. Initialize the modules for video IO, DINOv3 for shuttle/player detection,
-   homography, kinematics, and data writing.
-3. Open CSV file for writing extracted data.
-4. Start the main execution loop: for each video frame, perform shuttle and
-   player detection, apply homography to get 3D coordinates, compute kinematics,
-   and record the data.
-5. Visualize the output with video IO. Handle graceful shutdown and resource
-   cleanup after processing is complete.
-"""
-
 def main():
+    """Main execution method for the Slayminton application.
+    
+    Workflow:
+    1. Parse command-line arguments for mode, paths, and hyperparameters
+    2. Set up device (GPU/CPU) and output directories
+    3. Execute based on mode:
+       - 'train': Run DINOv3 training loop on COCO dataset
+       - 'track-frames': Track detections in a directory of frame images
+       - 'track-video': Extract, process, and analyze video frames end-to-end
+    4. For tracking modes: perform shuttle/player detection, compute game state,
+       generate rally analysis and visualization artifacts
+    5. Save tracking results, rally data, statistics, and annotated videos
+    """
     # some CLI arguments for flexibility
     print("pre_argparse")
     parser = argparse.ArgumentParser(description="Slayminton DINOv3 training + tracking")
@@ -266,13 +265,20 @@ def _run_track_frames(args, device):
     rally_tracker.finalize_rally_data(final_timestamp)
     rally_data = rally_tracker.get_rally_data()
 
-    analysis_results = analysis.compute_rally_statistics(rally_data)
+    # Build consolidated rally status and post-processed rally data
+    rally_status, consolidated_rally_data = build_rally_status_per_frame(
+        rally_data, len(frame_files), args.fps
+    )
+    print(f"[MAIN] consolidated rallies: {len(rally_data)} → {len(consolidated_rally_data)}")
+
+    analysis_results = analysis.compute_rally_statistics(consolidated_rally_data)
     analysis_results["output_dir"] = run_output_dir
     visualization_paths = analysis.visualize_results(analysis_results)
 
     output_path = os.path.join(run_output_dir, "tracking_results.json")
     rally_output_path = os.path.join(run_output_dir, "rally_data.json")
     stats_output_path = os.path.join(run_output_dir, "rally_statistics.json")
+    consolidated_rally_path = os.path.join(run_output_dir, "rally_data_consolidated.json")
 
     # use JSON for output due to flexibility to store nested data
     with open(output_path, "w", encoding="utf-8") as f:
@@ -280,6 +286,9 @@ def _run_track_frames(args, device):
 
     with open(rally_output_path, "w", encoding="utf-8") as f:
         json.dump(rally_data, f, indent=2)
+
+    with open(consolidated_rally_path, "w", encoding="utf-8") as f:
+        json.dump(consolidated_rally_data, f, indent=2)
 
     with open(stats_output_path, "w", encoding="utf-8") as f:
         json.dump(
@@ -294,6 +303,7 @@ def _run_track_frames(args, device):
     print(f"[MAIN] processed_frames={len(frame_files)}")
     print(f"[MAIN] saved_tracking={output_path}")
     print(f"[MAIN] saved_rally_data={rally_output_path}")
+    print(f"[MAIN] saved_consolidated_rally_data={consolidated_rally_path}")
     print(f"[MAIN] saved_stats={stats_output_path}")
     print(f"[MAIN] run_complete dir={run_output_dir}")
 
@@ -424,7 +434,13 @@ def _run_track_video(args, device):
         rally_tracker.finalize_rally_data(final_timestamp)
         rally_data = rally_tracker.get_rally_data()
         
-        analysis_results = analysis.compute_rally_statistics(rally_data)
+        # Build consolidated rally status and post-processed rally data
+        rally_status, consolidated_rally_data = build_rally_status_per_frame(
+            rally_data, len(frame_paths), args.fps
+        )
+        print(f"[MAIN] consolidated rallies: {len(rally_data)} → {len(consolidated_rally_data)}")
+        
+        analysis_results = analysis.compute_rally_statistics(consolidated_rally_data)
         analysis_results["output_dir"] = run_output_dir
         visualization_paths = analysis.visualize_results(analysis_results)
         
@@ -432,12 +448,16 @@ def _run_track_video(args, device):
         output_path = os.path.join(run_output_dir, "tracking_results.json")
         rally_output_path = os.path.join(run_output_dir, "rally_data.json")
         stats_output_path = os.path.join(run_output_dir, "rally_statistics.json")
+        consolidated_rally_path = os.path.join(run_output_dir, "rally_data_consolidated.json")
         
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(results, f, indent=2)
         
         with open(rally_output_path, "w", encoding="utf-8") as f:
             json.dump(rally_data, f, indent=2)
+        
+        with open(consolidated_rally_path, "w", encoding="utf-8") as f:
+            json.dump(consolidated_rally_data, f, indent=2)
         
         with open(stats_output_path, "w", encoding="utf-8") as f:
             json.dump(
@@ -462,6 +482,8 @@ def _run_track_video(args, device):
                 fps=int(args.fps),
                 court_corners=runtime_court_corners,
                 mask_paths=mask_paths,
+                rally_status=rally_status,
+                rally_tracker=rally_tracker,
             )
         except Exception as e:
             print(f"[MAIN] warning: DINO visualization failed ({e})")
@@ -509,6 +531,7 @@ def _run_track_video(args, device):
         print(f"[MAIN] processed_frames={len(frame_paths)}")
         print(f"[MAIN] saved_tracking={output_path}")
         print(f"[MAIN] saved_rally_data={rally_output_path}")
+        print(f"[MAIN] saved_consolidated_rally_data={consolidated_rally_path}")
         print(f"[MAIN] saved_stats={stats_output_path}")
         print(f"[MAIN] run_complete dir={run_output_dir}")
     
