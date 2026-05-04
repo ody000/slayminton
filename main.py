@@ -246,6 +246,7 @@ def _run_track_frames(args, device):
                 "player": player_det.get("player"),
                 "shuttle": shuttle_det.get("shuttle"),
                 "rally_active": rally_active,
+                "should_visualize_shuttle": rally_tracker.should_visualize_shuttle(),
             }
         )
 
@@ -414,6 +415,7 @@ def _run_track_video(args, device):
                     "player": player_det.get("player"),
                     "shuttle": shuttle_det.get("shuttle"),
                     "rally_active": rally_active,
+                    "should_visualize_shuttle": rally_tracker.should_visualize_shuttle(),
                 }
             )
             
