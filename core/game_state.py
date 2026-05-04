@@ -18,7 +18,7 @@ GameState include:
 - hit_count: int - number of hits in the current rally
 """
 class GameState:
-    def __init__(self, inactive_timeout_s: float = 1.0, min_displacement_px: float = 6.0):
+    def __init__(self, inactive_timeout_s: float = 1.0, min_displacement_px: float = 2.0):
         # motion-based rally rule config.
         self.inactive_timeout_s = float(inactive_timeout_s)
         self.min_displacement_px = float(min_displacement_px)

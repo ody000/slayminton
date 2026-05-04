@@ -238,7 +238,7 @@ class DINOTracker(nn.Module):
         frame,
         timestamp: float = 0.0,
         min_confidence: float = MIN_CONFIDENCE,
-        white_pixel_threshold: float = 0.05,
+        white_pixel_threshold: float = 0.03,
     ):
         """Detect shuttle and player in frame with optional post-processing filter.
         
