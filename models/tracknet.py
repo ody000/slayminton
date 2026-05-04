@@ -5,67 +5,60 @@ import torch
 import torch.nn as nn
 
 class Conv(nn.Module):
-    """The patched Conv layer that perfectly mimics the TensorFlow bug."""
-    def __init__(self, ic, oc, bc, k=3, p=1, act=True):
+    """Convolutional block with BatchNorm and ReLU activation."""
+    def __init__(self, in_channels, out_channels, kernel_size=3, padding=1, activation=True):
         super(Conv, self).__init__()
-        self.conv = nn.Conv2d(ic, oc, kernel_size=k, padding=p)
-        self.bn = nn.BatchNorm2d(bc)
-        self.act = nn.ReLU() if act else nn.Identity()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=padding)
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.act = nn.ReLU() if activation else nn.Identity()
 
     def forward(self, x):
-        x = self.act(self.conv(x))
-        
-        # The TensorFlow-to-PyTorch hack!
-        # Rotates tensor from [Batch, Channels, Height, Width] 
-        # to [Batch, Width, Height, Channels]
-        x = x.transpose(1, 3)    
-        
-        x = self.bn(x)           # Applies BN over the Width dimension!
-        
-        x = x.transpose(1, 3)    # Rotates it back
+        x = self.conv(x)
+        x = self.bn(x)
+        x = self.act(x)
         return x
 
 class TrackNet(nn.Module):
     def __init__(self, out_channels=3):
         super(TrackNet, self).__init__()
         
-        # Encoder (Notice the 3rd parameter is the Image Width, not Channels!)
-        self.conv2d_1 = Conv(9, 64, 512)
-        self.conv2d_2 = Conv(64, 64, 512)
+        # Encoder: 9-channel input (3 stacked RGB frames)
+        self.conv2d_1 = Conv(9, 64)
+        self.conv2d_2 = Conv(64, 64)
         self.maxpool1 = nn.MaxPool2d(kernel_size=2, stride=2)
         
-        self.conv2d_3 = Conv(64, 128, 256)
-        self.conv2d_4 = Conv(128, 128, 256)
+        self.conv2d_3 = Conv(64, 128)
+        self.conv2d_4 = Conv(128, 128)
         self.maxpool2 = nn.MaxPool2d(kernel_size=2, stride=2)
         
-        self.conv2d_5 = Conv(128, 256, 128)
-        self.conv2d_6 = Conv(256, 256, 128)
-        self.conv2d_7 = Conv(256, 256, 128)
+        self.conv2d_5 = Conv(128, 256)
+        self.conv2d_6 = Conv(256, 256)
+        self.conv2d_7 = Conv(256, 256)
         self.maxpool3 = nn.MaxPool2d(kernel_size=2, stride=2)
         
-        self.conv2d_8 = Conv(256, 512, 64)
-        self.conv2d_9 = Conv(512, 512, 64)
-        self.conv2d_10 = Conv(512, 512, 64)
+        self.conv2d_8 = Conv(256, 512)
+        self.conv2d_9 = Conv(512, 512)
+        self.conv2d_10 = Conv(512, 512)
         
-        # Decoder 
+        # Decoder with skip connections
         self.upsample1 = nn.Upsample(scale_factor=2, mode='nearest')
-        self.conv2d_11 = Conv(768, 256, 128)
-        self.conv2d_12 = Conv(256, 256, 128)
-        self.conv2d_13 = Conv(256, 256, 128)
+        self.conv2d_11 = Conv(768, 256)  # 512 + 256 (skip)
+        self.conv2d_12 = Conv(256, 256)
+        self.conv2d_13 = Conv(256, 256)
         
         self.upsample2 = nn.Upsample(scale_factor=2, mode='nearest')
-        self.conv2d_14 = Conv(384, 128, 256)
-        self.conv2d_15 = Conv(128, 128, 256)
+        self.conv2d_14 = Conv(384, 128)  # 256 + 128 (skip)
+        self.conv2d_15 = Conv(128, 128)
         
         self.upsample3 = nn.Upsample(scale_factor=2, mode='nearest')
-        self.conv2d_16 = Conv(192, 64, 512)
-        self.conv2d_17 = Conv(64, 64, 512)
+        self.conv2d_16 = Conv(192, 64)  # 128 + 64 (skip)
+        self.conv2d_17 = Conv(64, 64)
         
         self.conv2d_18 = nn.Conv2d(64, out_channels, kernel_size=1)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        # Encoder
+        # Encoder with skip connections
         x1 = self.conv2d_2(self.conv2d_1(x))
         x_pool1 = self.maxpool1(x1)
         
@@ -77,7 +70,7 @@ class TrackNet(nn.Module):
         
         x4 = self.conv2d_10(self.conv2d_9(self.conv2d_8(x_pool3)))
         
-        # Decoder with Skip Connections
+        # Decoder with skip connections
         up1 = self.upsample1(x4)
         concat1 = torch.cat([up1, x3], dim=1)
         d1 = self.conv2d_13(self.conv2d_12(self.conv2d_11(concat1)))
@@ -109,30 +102,20 @@ class TrackNetTracker:
 
     def __init__(self, weights_path: str = None, device: str = "cpu", box_size: int = 16):
         self.device = torch.device(device if isinstance(device, str) else ("cuda" if torch.cuda.is_available() else "cpu"))
-        # If weights provided, inspect output channel dimension from checkpoint to construct model accordingly.
+        
+        # Determine output channels from checkpoint or use default (1 for heatmap)
         out_ch = 1
         state = None
         if weights_path and os.path.exists(weights_path):
             try:
-                # load to CPU first to inspect shapes
                 state = torch.load(weights_path, map_location="cpu")
                 sd = state.get("state_dict", state) if isinstance(state, dict) else state
-                # look for conv2d_18.weight key or any key that endswith conv2d_18.weight
-                weight_key = None
-                for k in sd.keys():
-                    if k.endswith("conv2d_18.weight"):
-                        weight_key = k
+                # Look for final conv layer weight shape to infer output channels
+                for key in reversed(list(sd.keys())):
+                    if isinstance(sd[key], torch.Tensor) and sd[key].ndim == 4:
+                        out_ch = int(sd[key].shape[0])
                         break
-                if weight_key is None:
-                    # fallback: find any 4D weight with out-channels matching plausible values
-                    for k, v in sd.items():
-                        if isinstance(v, torch.Tensor) and v.ndim == 4:
-                            # choose the last conv-like layer as output
-                            weight_key = k
-                    # if still None, keep default
-                if weight_key is not None:
-                    out_ch = int(sd[weight_key].shape[0])
-                print(f"[TRACKNET] checkpoint suggests out_channels={out_ch} (key={weight_key})")
+                print(f"[TRACKNET] Loaded checkpoint suggests out_channels={out_ch}")
             except Exception as e:
                 print(f"[TRACKNET] Warning: failed to inspect weights ({e}), using default out_channels=1")
 
@@ -147,18 +130,11 @@ class TrackNetTracker:
         else:
             if weights_path:
                 print(f"[TRACKNET] Warning: weights not found at {weights_path}; using random init")
+        
         self.model.to(self.device).eval()
         self.box_size = int(box_size)
-        # Determine expected input spatial size. Many TrackNet models were trained
-        # on 288x512 (H x W). The Conv layer's BatchNorm `num_features` was used
-        # historically to carry the width; use that as a hint for expected width.
-        try:
-            expected_w = int(self.model.conv2d_1.bn.num_features)
-        except Exception:
-            expected_w = 512
-        # Default expected height (trained) — common TrackNet resolution is 288.
-        expected_h = 288
-        self.expected_size = (expected_h, expected_w)
+        # Standard TrackNet expected resolution
+        self.expected_size = (288, 512)  # (height, width)
 
     def _preprocess(self, frame: np.ndarray) -> torch.Tensor:
         # frame can be either a single HxWx3 RGB array or an iterable of 3 frames.

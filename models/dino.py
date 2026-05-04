@@ -169,10 +169,6 @@ class DINOTracker(nn.Module):
         # Reusable feature extraction for both heads.
         return _extract_cls_token(self.encoder, x)
 
-    def forward_dino(self, x: torch.Tensor) -> torch.Tensor:
-        # Student/teacher projection space used by SSL objective.
-        raise RuntimeError("forward_dino is not available in detection-only mode")
-
     def forward_detect(self, x: torch.Tensor) -> torch.Tensor:
         # Detection head output shape: (B, num_classes, 5).
         feat = self.encode(x)

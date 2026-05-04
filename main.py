@@ -1,20 +1,19 @@
 """
 Entry point for the Slayminton application.
-The main execution loop implemented here.
+Orchestrates training and tracking workflows.
 """
 
 import argparse
+from collections import deque
 from datetime import datetime
 import json
 import os
 from typing import List
-import shutil
 
 import cv2
 import numpy as np
 from PIL import Image
 import torch
-from collections import deque
 
 from core.analysis import Analysis
 from core.game_state import GameState, build_rally_status_per_frame
@@ -37,8 +36,6 @@ def main():
        generate rally analysis and visualization artifacts
     5. Save tracking results, rally data, statistics, and annotated videos
     """
-    # some CLI arguments for flexibility
-    print("pre_argparse")
     parser = argparse.ArgumentParser(description="Slayminton DINOv3 training + tracking")
     parser.add_argument("--mode", choices=["train", "track-frames", "track-video"], default="train")
     parser.add_argument("--train-dir", default="data/input/train")
@@ -127,7 +124,6 @@ def main():
         default=120,
         help="Maximum number of frames to process in track-frames mode",
     )
-    print("[MAIN] check 1")
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--rally-timeout-s", type=float, default=0.5)
     parser.add_argument("--min-shuttle-motion-px", type=float, default=2.0)
@@ -213,8 +209,6 @@ def _run_track_frames(args, device):
         min_displacement_px=args.min_shuttle_motion_px,
     )
     analysis = Analysis()
-
-    from collections import deque
 
     frame_files: List[str] = sorted(
         [
