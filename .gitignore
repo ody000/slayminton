@@ -12,6 +12,7 @@
 *.m4v
 .DS_Store
 */__pycache__
+__pycache__/
 *.log
 *.err
 data/output/*
