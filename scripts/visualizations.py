@@ -758,6 +758,7 @@ def draw_dino_boxes_with_heatmap(
                 cx, cy = x + w // 2, y + h // 2
                 cv2.circle(frame, (cx, cy), 4, SHUTTLE_COLOR, -1, cv2.LINE_AA)
                 #do a bunch of shuttle analysis here
+                print(f"[SHUTTLE TRACKING] {cx}, {cy}", )
                 court_x, court_y = shuttle_to_court(cx, cy,  homography)
                 in_out = _CX0 <= court_x <= _CX1 and _CY0 <= court_y <= _CY1
 
@@ -890,9 +891,10 @@ def shuttle_to_court(
     H: np.ndarray,
 ) -> tuple[float, float]:
 
+    
     pt = np.array([[[x, y]]], dtype=np.float32)
     mapped = cv2.perspectiveTransform(pt, H)
-
+    print("[SHUTTLE TRACKING] doing some calculations")
     return float(mapped[0]), float(mapped[1])
 
 
