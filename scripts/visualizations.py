@@ -805,10 +805,10 @@ def draw_dino_boxes_with_heatmap(
             else:
                 label = "No Rally"
                 color = (0, 0, 255)  # Red
-                if in_out:
-                    label+= ": in"
-                else:
-                    label+= ": out"
+            if in_out:
+                label+= ": in"
+            else:
+                label+= ": out"
 
             # Draw text with background for better visibility
             font = cv2.FONT_HERSHEY_SIMPLEX
@@ -907,21 +907,6 @@ def save_masked_frames_with_boxes(
         cv2.imwrite(out_path, masked, [cv2.IMWRITE_JPEG_QUALITY, 95])
 
     print(f"[MASKED_FRAMES] saved {len(os.listdir(out_dir))} frames → {out_dir}")
-
-
-def shuttle_to_court(
-    x: float,
-    y: float,
-    H: np.ndarray,
-) -> tuple[float, float]:
-
-    
-    pt = np.array([[[x, y]]], dtype=np.float32)
-    mapped = cv2.perspectiveTransform(pt, H)[0][0]
-    print("[SHUTTLE TRACKING] doing some calculations")
-    return float(mapped[0]), float(mapped[1])
-
-
 
 
 
