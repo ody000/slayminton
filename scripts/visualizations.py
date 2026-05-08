@@ -759,8 +759,8 @@ def draw_dino_boxes_with_heatmap(
                 cv2.circle(frame, (cx, cy), 4, SHUTTLE_COLOR, -1, cv2.LINE_AA)
                 #do a bunch of shuttle analysis here
                 print(f"[SHUTTLE TRACKING] {cx}, {cy}", )
-                court_x, court_y = shuttle_to_court(cx, cy,  homography)
-                in_out = _CX0 <= court_x <= _CX1 and _CY0 <= court_y <= _CY1
+                ix, iy = video_to_insert(cx, cy, W, H, homography)
+                in_out = _CX0 <= ix <= _CX1 and _CY0 <= iy <= _CY1
 
             if stationary_insert is not None:
                 insert = stationary_insert.copy()
