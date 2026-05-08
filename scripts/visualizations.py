@@ -702,6 +702,7 @@ def draw_dino_boxes_with_heatmap(
     for i, frame_path in enumerate(frame_paths):
         frame = cv2.imread(frame_path)
         in_out = False
+        shuttle_pos = None
         if frame is None:
             frame = np.zeros((H, W, 3), dtype=np.uint8)
         
@@ -760,6 +761,7 @@ def draw_dino_boxes_with_heatmap(
                 #do a bunch of shuttle analysis here
                 print(f"[SHUTTLE TRACKING] {cx}, {cy}", )
                 ix, iy = video_to_insert(cx, cy, W, H, homography)
+                shuttle_pos = (ix, iy)
                 court_poly = np.array([
                     [_CX0, _CY1],
                     [_CX1, _CY1],
@@ -773,6 +775,7 @@ def draw_dino_boxes_with_heatmap(
                     False
                 ) >= 0
 
+
             if stationary_insert is not None:
                 insert = stationary_insert.copy()
                 if state is not None:
@@ -782,6 +785,8 @@ def draw_dino_boxes_with_heatmap(
                         draw_player_marker(insert, p1_pos, P1_COLOR, "P1")
                     if isinstance(p2_pos, tuple):
                         draw_player_marker(insert, p2_pos, P2_COLOR, "P2")
+                if shuttle_pos is not None:
+                    draw_player_marker(insert, shuttle_pos, P1_COLOR, "P1")
                 paste_insert_bottom_right(frame, insert, INSERT_ALPHA)
         
         # Draw rally status in top-right corner
