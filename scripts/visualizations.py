@@ -307,6 +307,13 @@ def draw_player_marker(canvas: np.ndarray, pos: tuple[int, int], color: tuple[in
     cv2.circle(canvas, pos, 5, color, -1, cv2.LINE_AA)
     cv2.putText(canvas, label, (pos[0] + 6, pos[1] + 4),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.28, color, 1, cv2.LINE_AA)
+    
+def draw_shuttle_marker(canvas: np.ndarray, pos: tuple[int, int], color: tuple[int, int, int], label: str) -> None:
+    """Draw marker for shuttle."""
+    cv2.circle(canvas, pos, 5, (0, 0, 0), 2, cv2.LINE_AA)
+    cv2.circle(canvas, pos, 3, color, -1, cv2.LINE_AA)
+    cv2.putText(canvas, label, (pos[0] + 6, pos[1] + 4),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.28, color, 1, cv2.LINE_AA)
 
 
 def _ema_point(prev: tuple[float, float] | None, current: tuple[float, float], alpha: float = 0.65) -> tuple[float, float]:
@@ -785,6 +792,8 @@ def draw_dino_boxes_with_heatmap(
                         draw_player_marker(insert, p1_pos, P1_COLOR, "P1")
                     if isinstance(p2_pos, tuple):
                         draw_player_marker(insert, p2_pos, P2_COLOR, "P2")
+                    if shuttle_pos is not None:
+                        draw_shuttle_marker(insert, shuttle_pos, SHUTTLE_COLOR, "SH")
                 paste_insert_bottom_right(frame, insert, INSERT_ALPHA)
         
         # Draw rally status in top-right corner
@@ -796,10 +805,11 @@ def draw_dino_boxes_with_heatmap(
             else:
                 label = "No Rally"
                 color = (0, 0, 255)  # Red
-            if in_out:
-                label+= ": in"
-            else:
-                label+= ": out"
+                if in_out:
+                    label+= ": in"
+                else:
+                    label+= ": out"
+
             # Draw text with background for better visibility
             font = cv2.FONT_HERSHEY_SIMPLEX
             font_scale = 0.7

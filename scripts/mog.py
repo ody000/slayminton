@@ -7,6 +7,8 @@ All JPGs live flat in data/input/train/. Filenames follow the pattern:
 
 Files are grouped by <video_id>, each group processed as one video sequence.
 
+coco_mog2 is just a quick script to properly transfer all coco annotations from one format to the other
+
 Outputs:
   - Frames: data/input/train_mog_frames/<video_id>/<original_filename>.jpg
   - Videos: data/input/train_mog_mp4s/<video_id>.mp4
@@ -107,13 +109,12 @@ def coco_mog2():
 
         for img in coco["images"]:
             name = img["file_name"]
-
-            # extract video_id (same logic as your script)
+            #finds image files based on name pattern established earlier
             dash_idx = name.find("-")
             if dash_idx != -1:
                 video_id = name[:dash_idx]
             else:
-                video_id = "unknown"
+                raise("u shouldn't be here :(")
 
             img["file_name"] = video_id + "/" + name
 
@@ -133,6 +134,8 @@ def main() -> None:
     for video_id, frame_paths in groups.items():
         process_video(video_id, frame_paths)
 
+    coco_mog2()
+
     print("\n\nAll done.")
     print(f"  Frames -> {FRAMES_OUT_PATH}/")
     print(f"  Videos -> {VIDEOS_OUT_PATH}/")
@@ -140,4 +143,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    coco_mog2()
+    main()
