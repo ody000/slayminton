@@ -760,7 +760,18 @@ def draw_dino_boxes_with_heatmap(
                 #do a bunch of shuttle analysis here
                 print(f"[SHUTTLE TRACKING] {cx}, {cy}", )
                 ix, iy = video_to_insert(cx, cy, W, H, homography)
-                in_out = _CX0 <= ix <= _CX1 and _CY0 <= iy <= _CY1
+                court_poly = np.array([
+                    [_CX0, _CY1],
+                    [_CX1, _CY1],
+                    [_CX1, _CY0],
+                    [_CX0, _CY0],
+                ], dtype=np.int32)
+
+                in_out = cv2.pointPolygonTest(
+                    court_poly,
+                    (float(ix), float(iy)),
+                    False
+                ) >= 0
 
             if stationary_insert is not None:
                 insert = stationary_insert.copy()
