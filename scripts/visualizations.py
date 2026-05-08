@@ -893,7 +893,7 @@ def shuttle_to_court(
 
     
     pt = np.array([[[x, y]]], dtype=np.float32)
-    mapped = cv2.perspectiveTransform(pt, H)
+    mapped = cv2.perspectiveTransform(pt, H)[0][0]
     print("[SHUTTLE TRACKING] doing some calculations")
     return float(mapped[0]), float(mapped[1])
 
