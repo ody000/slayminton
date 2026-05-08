@@ -19,7 +19,7 @@ import numpy as np
 import os
 import glob
 import json
-
+from collections import deque
 # ── Paths ────────────────────────────────────────────────────────────────────
 TRAIN_PATH       = "data/input/train"
 MASK_FRAMES_PATH = "data/input/train_mog_frames"
@@ -75,6 +75,8 @@ _CY1 = INSERT_H - COURT_PAD
 _CMX = (_CX1 - _CX0) / 2.0
 _CW  = _CX1 - _CX0   # court pixel width
 _CH  = _CY1 - _CY0   # court pixel height
+
+
 
 
 def m_to_px(mx: float, my: float) -> tuple[int, int]:
@@ -689,14 +691,17 @@ def draw_dino_boxes_with_heatmap(
     frame_states: list[dict[str, object]] = []
     if court_corners is not None and mask_paths is not None:
         stationary_insert, frame_states = precompute_player_court_heatmap(mask_paths, court_corners, W, H)
+        homography = compute_homography(H, W, court_corners)
+        
     
     PLAYER_COLOR = (0, 255, 0)    # Green
     SHUTTLE_COLOR = (0, 0, 255)   # Red
     
     print(f"[DINO_VIZ] annotating {len(frame_paths)} frames @ {fps}fps {W}x{H}")
-    
+
     for i, frame_path in enumerate(frame_paths):
         frame = cv2.imread(frame_path)
+        in_out = False
         if frame is None:
             frame = np.zeros((H, W, 3), dtype=np.uint8)
         
@@ -741,6 +746,9 @@ def draw_dino_boxes_with_heatmap(
                 # Mark the shuttle center without creating a heatmap trail.
                 cx, cy = x + w // 2, y + h // 2
                 cv2.circle(frame, (cx, cy), 4, SHUTTLE_COLOR, -1, cv2.LINE_AA)
+                #do a bunch of shuttle analysis here
+                court_x, court_y = shuttle_to_court(cx, cy,  homography)
+                in_out = _CX0 <= court_x <= _CX1 and _CY0 <= court_y <= _CY1
 
             if stationary_insert is not None:
                 insert = stationary_insert.copy()
@@ -762,6 +770,10 @@ def draw_dino_boxes_with_heatmap(
             else:
                 label = "No Rally"
                 color = (0, 0, 255)  # Red
+            if in_out:
+                label+= ": in"
+            else:
+                label+= ": out"
             
             # Draw text with background for better visibility
             font = cv2.FONT_HERSHEY_SIMPLEX
@@ -860,6 +872,21 @@ def save_masked_frames_with_boxes(
         cv2.imwrite(out_path, masked, [cv2.IMWRITE_JPEG_QUALITY, 95])
 
     print(f"[MASKED_FRAMES] saved {len(os.listdir(out_dir))} frames → {out_dir}")
+
+
+def shuttle_to_court(
+    x: float,
+    y: float,
+    H: np.ndarray,
+) -> tuple[float, float]:
+
+    pt = np.array([[[x, y]]], dtype=np.float32)
+    mapped = cv2.perspectiveTransform(pt, H)
+
+    return float(mapped[0]), float(mapped[1])
+
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
