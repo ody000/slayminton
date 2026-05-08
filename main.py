@@ -17,7 +17,7 @@ import torch
 from collections import deque
 
 from core.analysis import Analysis
-from core.game_state import GameState
+from core.game_state import GameState, build_rally_status_per_frame
 from models.dino import DINODataset, DINOTracker, train_dino
 from models.tracknet import TrackNetTracker
 from utils.video_io import extract_frames, apply_mog2_to_frames
@@ -266,7 +266,12 @@ def _run_track_frames(args, device):
     rally_tracker.finalize_rally_data(final_timestamp)
     rally_data = rally_tracker.get_rally_data()
 
-    analysis_results = analysis.compute_rally_statistics(rally_data)
+    rally_status, consolidated_rally_data = build_rally_status_per_frame(
+        rally_data, len(frame_files), args.fps
+    )
+    print(f"[MAIN] consolidated rallies: {len(rally_data)} → {len(consolidated_rally_data)}")
+
+    analysis_results = analysis.compute_rally_statistics(consolidated_rally_data)
     analysis_results["output_dir"] = run_output_dir
     visualization_paths = analysis.visualize_results(analysis_results)
 
@@ -280,6 +285,7 @@ def _run_track_frames(args, device):
 
     with open(rally_output_path, "w", encoding="utf-8") as f:
         json.dump(rally_data, f, indent=2)
+    
 
     with open(stats_output_path, "w", encoding="utf-8") as f:
         json.dump(
