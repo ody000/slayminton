@@ -782,35 +782,9 @@ def draw_dino_boxes_with_heatmap(
                 label = "No Rally"
                 color = (0, 0, 255)  # Red
             if in_out:
-                label = ": in"
+                label+= ": in"
             else:
-                label = ": out"
-            
-            # Draw text with background for better visibility
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.7
-            thickness = 2
-            text_size = cv2.getTextSize(label, font, font_scale, thickness)[0]
-            
-            # Position in top-right corner with small margin
-            text_x = W - text_size[0] - 10
-            text_y = 25
-            
-            # Draw semi-transparent background
-            overlay = frame.copy()
-            cv2.rectangle(overlay, (text_x - 5, text_y - text_size[1] - 5),
-                         (W - 5, text_y + 5), (0, 0, 0), -1)
-            cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
-            
-            # Draw text
-            cv2.putText(frame, label, (text_x, text_y),
-                       font, font_scale, color, thickness, cv2.LINE_AA)
-        else:
-            if in_out:
-                label = "in"
-            else:
-                label = "out"
-            
+                label+= ": out"
             # Draw text with background for better visibility
             font = cv2.FONT_HERSHEY_SIMPLEX
             font_scale = 0.7
