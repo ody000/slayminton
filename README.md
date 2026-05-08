@@ -7,19 +7,20 @@ Badminton game analysis project that uses computer vision to track shuttlecocks 
 	- `track-frames`: dry-run DINO over a folder of frames.
 	- `track-video`: full pipeline (frame extraction, MOG2 masking, detection, rally analysis, visualization).
 
-`utils/video_io.py`: Frame extraction and background subtraction helpers.
+`utils/video_io.py`, `scripts/mog.py`: Frame extraction and background subtraction helpers.
 	- `extract_frames`: extracts JPG frames into `output_dir`.
-	- `apply_mog2_to_frames`: creates cv.MOG2 mask frames.
+	- `apply_mog2_to_frames`: creates cv.MOG2 mask frames. This 
 
 `models/dino.py`: DINO model, `DINOTracker` class wrapper and training utilities.
 	- `DINOTracker.detect`: returns player/shuttle detections for a frame.
 
-`core/game_state.py`: Rally and game-state tracking using shuttle motion inactivity rules.
+`models/tracknet.py`: TrackNetv2 model. Class wrapper. Takes in pretrained weights.
 
-`core/analysis.py`: Compute rally statistics and generate metric visualizations (histogram PNGs).
+`core/game_state.py`, `core/analysis.py`: Rally and game-state tracking using shuttle motion inactivity rules. Compute rally statistics and generate metric visualizations (histogram PNGs).
 
 `scripts/visualizations.py`: Includes many visualization utilities (replaces earlier `utils/visualization.py`).
 	- `process_video`: builds a court-insert heatmap from mask frames and renders a visualization MP4.
+	- `compute homography`: takes in court corners (via GUI or predefined JSON file) and transforms player location onto rectangular coordinates.
 	- `draw_dino_boxes_with_heatmap`: produces annotated MP4s with DINO boxes and a pasted, stationary court heatmap (bottom-right insert).
 	- Along with other debugging diagnostic methods.
 
@@ -33,7 +34,7 @@ Output layout (per run through `track-video`):
 			- `mask_frames/` — MOG2 mask frames
 			- `masked_frames/` — masked RGB frames with boxes (auto-generated)
 
-Run example (track-video):
+Local run example (track-video):
 ```
 python main.py --mode track-video --video-path data/input/match_clip.mp4 --weights dino_tracker.pt --fps 30
 ```

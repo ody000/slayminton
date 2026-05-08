@@ -1,7 +1,7 @@
 Introduction
 Badminton is fast and demands precise shot placement and footwork. Manual replay analysis is slow and lacks automated metrics, leaving coaches without scalable tools for rally, movement, and shot analysis. Tracking is challenging due to a small, fast shuttlecock and dynamic play. We built Slayminton, a computer-vision pipeline that tracks players and shuttlecocks and extracts game statistics from video.
 
-**Goals:** (1) Real-time player and shuttle detection, (2) automatic rally segmentation and statistics, (3) footwork heatmaps via homography, (4) annotated video exports for review.
+(1) Real-time player and shuttle detection, (2) automatic rally segmentation and statistics, (3) footwork heatmaps via homography, (4) annotated video exports for review.
 
 Methods
 Data Processing Pipeline

@@ -18,7 +18,7 @@ GameState include:
 - hit_count: int - number of hits in the current rally
 """
 class GameState:
-    def __init__(self, inactive_timeout_s: float = 1.0, min_displacement_px: float = 6.0):
+    def __init__(self, inactive_timeout_s: float = 1.0, min_displacement_px: float = 2.0):
         # motion-based rally rule config.
         self.inactive_timeout_s = float(inactive_timeout_s)
         self.min_displacement_px = float(min_displacement_px)
@@ -362,7 +362,8 @@ def build_rally_status_per_frame(rally_data: list, total_frames: int, fps: float
             if i < len(rally_status):
                 rally_status[i] = True
     
-    # Post-process: merge short rally/non-rally periods
+    # Post-process: merge short non-rally periods into surrounding rally periods
+    # Bias towards rally_active=True: short gaps of False get absorbed into True
     consolidated = rally_status.copy()
     i = 0
     while i < len(consolidated):
@@ -373,11 +374,18 @@ def build_rally_status_per_frame(rally_data: list, total_frames: int, fps: float
             i += 1
         period_len = i - start_i
         
-        # If period is shorter than threshold, merge with surrounding state
-        if period_len < min_period_frames and start_i > 0:
+        # If period is shorter than threshold and is False (no rally),
+        # merge it into surrounding True (rally active)
+        if period_len < min_period_frames and current_state == False and start_i > 0:
+            # Look ahead to see if next state is True
+            next_state = consolidated[i] if i < len(consolidated) else None
             prev_state = consolidated[start_i - 1]
-            for j in range(start_i, i):
-                consolidated[j] = prev_state
+            
+            # Prefer to merge into True if available
+            if next_state == True or prev_state == True:
+                merge_into = True
+                for j in range(start_i, i):
+                    consolidated[j] = merge_into
     
     # Rebuild rally_data from consolidated status
     consolidated_rally_data = []

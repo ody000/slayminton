@@ -731,11 +731,22 @@ def draw_dino_boxes_with_heatmap(
                     cv2.putText(frame, "Player", (x, max(y - 6, 12)), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, PLAYER_COLOR, 2, cv2.LINE_AA)
             
-            # Draw shuttle bounding box (red) and accumulate heatmap if visualization is enabled
-            # Check if shuttle should be visualized based on game_state hints or rally_tracker
-            should_visualize = True
-            if rally_tracker is not None:
-                should_visualize = rally_tracker.should_visualize_shuttle()
+            # Draw shuttle bounding box (red) if visualization is enabled for this frame
+            # Use consolidated rally_status if available (biased towards rally_active=True)
+            # Otherwise fall back to per-frame hints
+            should_visualize = False
+            if rally_status is not None and i < len(rally_status):
+                # Use consolidated rally status (includes 1-3 frame gap filling)
+                should_visualize = rally_status[i]
+            elif result.get("rally_active", False):
+                # Fallback to raw frame-by-frame rally status
+                should_visualize = True
+            else:
+                # Outside rally: use per-frame hints (stationarity/discarding)
+                if "should_visualize_shuttle" in result:
+                    should_visualize = result["should_visualize_shuttle"]
+                elif rally_tracker is not None:
+                    should_visualize = rally_tracker.should_visualize_shuttle()
             
             shuttle_det = result.get("shuttle")
             if should_visualize and shuttle_det and isinstance(shuttle_det, (list, tuple)) and len(shuttle_det) >= 5:
