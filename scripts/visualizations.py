@@ -785,8 +785,6 @@ def draw_dino_boxes_with_heatmap(
                         draw_player_marker(insert, p1_pos, P1_COLOR, "P1")
                     if isinstance(p2_pos, tuple):
                         draw_player_marker(insert, p2_pos, P2_COLOR, "P2")
-                if shuttle_pos is not None:
-                    draw_player_marker(insert, shuttle_pos, P1_COLOR, "P1")
                 paste_insert_bottom_right(frame, insert, INSERT_ALPHA)
         
         # Draw rally status in top-right corner
