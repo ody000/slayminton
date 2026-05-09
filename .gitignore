@@ -16,6 +16,7 @@ __pycache__/
 *.log
 *.err
 data/output/*
+data/input/*
 models/dinov2_vitb14_reg4_pretrain.pth
 *.pyc
 dino_tracker_old.pt
